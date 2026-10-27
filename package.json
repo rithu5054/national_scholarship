@@ -1,0 +1,23 @@
+{
+  "name": "scholartrack",
+  "version": "1.0.0",
+  "description": "ScholarTrack – Smart Scholarship Eligibility, Verification & Tracking Portal",
+  "main": "server/server.js",
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "build": "cd client && npm install && npm run build && cd ../server && npm install",
+    "start": "node server/server.js",
+    "dev:server": "cd server && node server.js",
+    "dev:client": "cd client && npm run dev"
+  },
+  "keywords": [
+    "scholarship",
+    "ocr",
+    "react",
+    "nodejs",
+    "express",
+    "mongodb"
+  ],
+  "author": "Rohan Karthick P S",
+  "license": "ISC"
+}
