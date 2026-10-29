@@ -69,6 +69,15 @@ const startServer = async () => {
   });
 };
 
+// Global process protection against async worker or third-party crashes
+process.on('uncaughtException', (err) => {
+  console.error('[ScholarTrack] Intercepted uncaughtException (process preserved):', err.message || err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[ScholarTrack] Intercepted unhandledRejection (process preserved):', reason);
+});
+
 if (require.main === module) {
   startServer();
 }
