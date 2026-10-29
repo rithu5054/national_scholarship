@@ -39,12 +39,13 @@ const ApplicationViewPage = () => {
       const res = await api.get(`/applications/${id}`);
       if (res.data.success) {
         setApplication(res.data.application);
-        setDocuments(res.data.documents);
-        setEditedIncome(res.data.application.applicationData.annualFamilyIncome);
-        setEditedMarks(res.data.application.applicationData.percentageOrCGPA);
+        setDocuments(res.data.documents || []);
+        setEditedIncome(res.data.application?.applicationData?.annualFamilyIncome ?? '');
+        setEditedMarks(res.data.application?.applicationData?.percentageOrCGPA ?? '');
       }
     } catch (err) {
       console.error('Failed to load application:', err);
+      setStatusMessage({ type: 'error', text: err.response?.data?.message || 'Failed to load application details.' });
     } finally {
       setLoading(false);
     }
@@ -150,10 +151,12 @@ const ApplicationViewPage = () => {
   const getAppDoc = (type) => {
     const isIncome = type.toLowerCase().includes('income');
     const isMark = type.toLowerCase().includes('mark');
-    return documents.find((d) =>
-      d.documentType === type ||
-      (isIncome && d.documentType.toLowerCase().includes('income')) ||
-      (isMark && d.documentType.toLowerCase().includes('mark'))
+    return (documents || []).find((d) =>
+      d && (
+        d.documentType === type ||
+        (isIncome && d.documentType?.toLowerCase().includes('income')) ||
+        (isMark && d.documentType?.toLowerCase().includes('mark'))
+      )
     );
   };
 
@@ -285,8 +288,8 @@ const ApplicationViewPage = () => {
           {[
             { stage: 'Draft & Profile', active: true, done: true },
             { stage: 'Eligibility Checked', active: true, done: !!application.eligibilityEvaluation?.isEligible },
-            { stage: 'Documents Uploaded', active: documents.length > 0, done: documents.length >= requiredDocs.length },
-            { stage: 'Pre-Verification', active: documents.some(d => d.validationResults?.hasMismatch !== undefined), done: !documents.some(d => d.validationResults?.hasMismatch) && documents.length > 0 },
+            { stage: 'Documents Uploaded', active: documents.length > 0, done: documents.length >= appCertSlots.length },
+            { stage: 'Pre-Verification', active: documents.length > 0, done: bothMatched },
             { stage: 'Officer Verification', active: application.status !== 'draft', done: ['approved', 'rejected'].includes(application.status) },
           ].map((st, i) => (
             <div
