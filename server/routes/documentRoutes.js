@@ -6,8 +6,10 @@ const {
   uploadDocument,
   getDocumentFile,
   revalidateDocument,
+  getMyDocuments,
 } = require('../controllers/documentController');
 
+router.get('/my-documents', authenticate, getMyDocuments);
 router.post('/upload', authenticate, upload.single('file'), uploadDocument);
 router.get('/:id/file', authenticate, getDocumentFile);
 router.post('/:id/revalidate', authenticate, revalidateDocument);

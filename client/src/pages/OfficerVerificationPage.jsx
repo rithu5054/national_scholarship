@@ -27,6 +27,8 @@ const OfficerVerificationPage = () => {
   const [decisionModal, setDecisionModal] = useState({ open: false, type: 'Approved', reason: '' });
   // Correction Modal State
   const [correctionModal, setCorrectionModal] = useState({ open: false, docId: null, docType: '', reason: '' });
+  // Mismatch Override Modal State (for verifying docs that have detected mismatches)
+  const [overrideModal, setOverrideModal] = useState({ open: false, docId: null, docType: '', mismatches: [], reason: '' });
 
   const fetchAppData = async () => {
     try {
@@ -47,10 +49,22 @@ const OfficerVerificationPage = () => {
     fetchAppData();
   }, [id]);
 
-  const handleDocumentVerify = async (docId) => {
+  const handleDocumentVerify = async (doc) => {
+    // If the document has mismatches, require the officer to explicitly override
+    if (doc.validationResults?.hasMismatch) {
+      setOverrideModal({
+        open: true,
+        docId: doc._id,
+        docType: doc.documentType,
+        mismatches: doc.validationResults.mismatchDetails || [],
+        reason: '',
+      });
+      return;
+    }
+    // No mismatches — verify directly
     try {
       setActionLoading(true);
-      const res = await api.post(`/officer/documents/${docId}/review`, {
+      const res = await api.post(`/officer/documents/${doc._id}/review`, {
         action: 'verify',
         notes: 'Document inspected and verified authentic by officer.',
       });
@@ -60,6 +74,29 @@ const OfficerVerificationPage = () => {
       }
     } catch (err) {
       setStatusMessage({ type: 'error', text: err.response?.data?.message || 'Verification failed.' });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleOverrideVerify = async () => {
+    if (!overrideModal.reason || overrideModal.reason.trim().length < 10) {
+      alert('Please provide a specific override reason (at least 10 characters).');
+      return;
+    }
+    try {
+      setActionLoading(true);
+      const res = await api.post(`/officer/documents/${overrideModal.docId}/review`, {
+        action: 'verify',
+        overrideReason: overrideModal.reason,
+      });
+      if (res.data.success) {
+        setOverrideModal({ open: false, docId: null, docType: '', mismatches: [], reason: '' });
+        setStatusMessage({ type: 'success', text: `Document verified with override reason recorded.` });
+        await fetchAppData();
+      }
+    } catch (err) {
+      setStatusMessage({ type: 'error', text: err.response?.data?.message || 'Override verification failed.' });
     } finally {
       setActionLoading(false);
     }
@@ -229,6 +266,21 @@ const OfficerVerificationPage = () => {
           </p>
         </div>
 
+        {/* Unresolved Mismatch Warning Banner */}
+        {documents.some((d) => d.validationResults?.hasMismatch && d.currentStatus !== 'Officer Verified') && (
+          <div className="p-3 rounded-xl bg-red-50 border border-red-300 text-xs text-red-900 flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold">⚠ Unresolved mismatches: </span>
+              {documents
+                .filter((d) => d.validationResults?.hasMismatch && d.currentStatus !== 'Officer Verified')
+                .map((d) => d.documentType)
+                .join(', ')}
+              {' '}— You must either request a correction from the student or click "Override & Verify" with an explicit reason before approving this application.
+            </div>
+          </div>
+        )}
+
         <div className="space-y-4">
           {documents.map((doc) => {
             const hasMismatch = doc.validationResults?.hasMismatch;
@@ -248,7 +300,7 @@ const OfficerVerificationPage = () => {
               >
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-bold text-sm text-slate-900">{doc.documentType}</span>
                       <span
                         className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
@@ -256,11 +308,18 @@ const OfficerVerificationPage = () => {
                             ? 'bg-emerald-100 text-emerald-800'
                             : doc.currentStatus === 'Correction Required'
                             ? 'bg-amber-100 text-amber-800'
+                            : hasMismatch
+                            ? 'bg-red-100 text-red-800'
                             : 'bg-blue-100 text-blue-800'
                         }`}
                       >
                         {doc.currentStatus}
                       </span>
+                      {hasMismatch && doc.currentStatus !== 'Officer Verified' && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200">
+                          ⚠ Requires Override
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs text-slate-500 mt-1">
                       File: {doc.originalFileName} ({(doc.fileSize / 1024).toFixed(1)} KB)
@@ -280,11 +339,15 @@ const OfficerVerificationPage = () => {
                     {doc.currentStatus !== 'Officer Verified' && (
                       <>
                         <button
-                          onClick={() => handleDocumentVerify(doc._id)}
+                          onClick={() => handleDocumentVerify(doc)}
                           disabled={actionLoading}
-                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition"
+                          className={`px-3 py-1.5 text-white text-xs font-bold rounded-lg transition ${
+                            hasMismatch
+                              ? 'bg-orange-600 hover:bg-orange-700'
+                              : 'bg-emerald-600 hover:bg-emerald-700'
+                          }`}
                         >
-                          Mark Verified
+                          {hasMismatch ? 'Override & Verify' : 'Mark Verified'}
                         </button>
                         <button
                           onClick={() =>
@@ -388,6 +451,62 @@ const OfficerVerificationPage = () => {
                 className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg"
               >
                 Send Request
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mismatch Override Modal */}
+      {overrideModal.open && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-xl">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-orange-600 shrink-0" />
+              <h3 className="text-base font-bold text-slate-900">
+                Override & Verify: {overrideModal.docType}
+              </h3>
+            </div>
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 space-y-2">
+              <p className="text-xs font-bold text-red-900">Detected Mismatches (requires acknowledgement):</p>
+              {overrideModal.mismatches.map((m, i) => (
+                <div key={i} className="text-xs bg-white/80 rounded-lg p-2 border border-red-100">
+                  <p className="font-semibold text-red-900">{m.field}</p>
+                  <p className="text-red-800 mt-0.5 leading-relaxed">{m.reason}</p>
+                  {m.enteredValue && (
+                    <p className="text-[11px] text-red-700 mt-1">
+                      Application: <strong>{m.enteredValue}</strong> | Extracted: <strong>{m.extractedValue}</strong>
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Override Justification <span className="text-red-600">*</span> (min 10 characters)
+              </label>
+              <textarea
+                rows="3"
+                value={overrideModal.reason}
+                onChange={(e) => setOverrideModal({ ...overrideModal, reason: e.target.value })}
+                placeholder="e.g. Student confirmed in person — data extraction error due to poor scan quality. Physical document visually verified."
+                className="w-full text-xs p-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-300"
+              />
+              <p className="text-[11px] text-slate-400 mt-1">{overrideModal.reason.length} / 10 minimum characters</p>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setOverrideModal({ open: false, docId: null, docType: '', mismatches: [], reason: '' })}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleOverrideVerify}
+                disabled={actionLoading || overrideModal.reason.trim().length < 10}
+                className="px-4 py-2 bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold rounded-lg disabled:opacity-50"
+              >
+                {actionLoading ? 'Verifying...' : 'Confirm Override & Verify'}
               </button>
             </div>
           </div>

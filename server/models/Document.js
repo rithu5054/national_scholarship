@@ -86,6 +86,7 @@ const documentSchema = new mongoose.Schema(
         'Uploaded',
         'Pre-Verification Passed',
         'Mismatch Detected',
+        'Manual Review Required',
         'Correction Required',
         'Officer Verified',
         'Rejected',

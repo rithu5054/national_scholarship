@@ -67,12 +67,32 @@ const reviewDocument = async (req, res) => {
     if (!doc) return res.status(404).json({ success: false, message: 'Document not found.' });
 
     if (action === 'verify') {
-      doc.currentStatus = 'Officer Verified';
-      doc.officerReview = {
-        verifiedBy: req.user._id,
-        verifiedAt: new Date(),
-        notes: notes || 'Verified authentic by officer',
-      };
+      // Gate: if pre-verification found mismatches, officer must explicitly provide an override reason
+      if (doc.validationResults && doc.validationResults.hasMismatch) {
+        const { overrideReason } = req.body;
+        if (!overrideReason || overrideReason.trim().length < 10) {
+          return res.status(400).json({
+            success: false,
+            requiresOverride: true,
+            message: 'This document has detected pre-verification mismatches. You must provide a specific override reason (minimum 10 characters) explaining why you are verifying despite the discrepancies.',
+            mismatchDetails: doc.validationResults.mismatchDetails,
+          });
+        }
+        // Record override in audit notes
+        doc.currentStatus = 'Officer Verified';
+        doc.officerReview = {
+          verifiedBy: req.user._id,
+          verifiedAt: new Date(),
+          notes: `[MISMATCH OVERRIDE] ${overrideReason}`,
+        };
+      } else {
+        doc.currentStatus = 'Officer Verified';
+        doc.officerReview = {
+          verifiedBy: req.user._id,
+          verifiedAt: new Date(),
+          notes: notes || 'Verified authentic by officer',
+        };
+      }
       await doc.save();
 
       await logAudit({

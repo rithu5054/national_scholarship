@@ -203,56 +203,103 @@ const detectMismatches = async (applicationData, extractedData, documentType) =>
     const isIncomeDoc = docTypeUpper.includes('INCOME');
     const isAcademicDoc = docTypeUpper.includes('MARK') || docTypeUpper.includes('GRADE') || docTypeUpper.includes('TRANSCRIPT');
     const isCasteDoc = docTypeUpper.includes('CASTE') || docTypeUpper.includes('COMMUNITY');
+    const isBonafideDoc = docTypeUpper.includes('BONAFIDE') || docTypeUpper.includes('BONA FIDE') || docTypeUpper.includes('ENROLLMENT') || docTypeUpper.includes('STUDY');
+    const isCollegeIdDoc = docTypeUpper.includes('COLLEGE ID') || docTypeUpper.includes('STUDENT ID') || docTypeUpper.includes('ID CARD');
 
-    const hasAcademicKeywords = /(?:MARKSHEET|MARK\s*SHEET|EXAMINATION|SEMESTER|CREDITS|CGPA|GRADE\s*CARD|TRANSCRIPT|TOTAL\s*MARKS)/i.test(rawText);
-    const hasIncomeKeywords = /(?:INCOME\s*CERTIFICATE|ANNUAL\s*INCOME|TAHSILDAR|REVENUE\s*DEPARTMENT|PATWARI|TALUK)/i.test(rawText);
-    const hasCasteKeywords = /(?:CASTE\s*CERTIFICATE|COMMUNITY\s*CERTIFICATE|SCHEDULED\s*CASTE|SCHEDULED\s*TRIBE|OBC|BACKWARD\s*CLASS)/i.test(rawText);
+    const hasAcademicKeywords = /(?:MARKSHEET|MARK\s*SHEET|EXAMINATION|SEMESTER|CREDITS|CGPA|GRADE\s*CARD|TRANSCRIPT|TOTAL\s*MARKS|PERCENTAGE\s*OBTAINED)/i.test(rawText);
+    const hasIncomeKeywords = /(?:INCOME\s*CERTIFICATE|ANNUAL\s*INCOME|TAHSILDAR|REVENUE\s*DEPARTMENT|PATWARI|TALUK|TOTAL\s*INCOME|FAMILY\s*INCOME|BPL|APL)/i.test(rawText);
+    const hasCasteKeywords = /(?:CASTE\s*CERTIFICATE|COMMUNITY\s*CERTIFICATE|SCHEDULED\s*CASTE|SCHEDULED\s*TRIBE|OBC|BACKWARD\s*CLASS|SOCIAL\s*CATEGORY)/i.test(rawText);
+    const hasBonafideKeywords = /(?:BONAFIDE|BONA\s*FIDE|IS\s*A\s*STUDENT|ENROLLED\s*IN|STUDYING\s*IN|CURRENTLY\s*PURSUING|INSTITUTION\s*CERTIFIES|COLLEGE\s*CERTIFIES)/i.test(rawText);
+    const hasIdKeywords = /(?:STUDENT\s*ID|COLLEGE\s*ID|IDENTITY\s*CARD|ID\s*CARD|ENROLLMENT\s*NO|ROLL\s*NO)/i.test(rawText);
 
-    if (isIncomeDoc && hasAcademicKeywords && !hasIncomeKeywords) {
+    // --- Strict positive content check per slot ---
+    // Each required doc type must contain at least one expected keyword from its own category.
+    // If it doesn't (even if it doesn't contain competing keywords) it's flagged as wrong type.
+
+    if (isIncomeDoc && !hasIncomeKeywords && !extractedData.incomeAmount) {
+      const detectedType = hasAcademicKeywords
+        ? 'Academic Mark Sheet / Transcript'
+        : hasCasteKeywords
+        ? 'Community / Caste Certificate'
+        : hasBonafideKeywords
+        ? 'Bonafide Certificate'
+        : 'Unrecognized Document';
       mismatches.push({
         field: 'Document Type Conflict',
         enteredValue: documentType,
-        extractedValue: 'Academic Mark Sheet / Transcript',
-        reason: `Uploaded document appears to be an Academic Mark Sheet rather than the required Income Certificate.`,
+        extractedValue: detectedType,
+        reason: `Uploaded document does not appear to be an Income Certificate. Expected keywords such as "Annual Income", "Tahsildar", "Revenue Department", or "Family Income" were not detected.${detectedType !== 'Unrecognized Document' ? ` The document content resembles a ${detectedType}.` : ''} Please re-upload the correct certificate.`,
         severity: 'High',
       });
-    } else if (isAcademicDoc && hasIncomeKeywords && !hasAcademicKeywords) {
+    } else if (isAcademicDoc && !hasAcademicKeywords && !extractedData.marks) {
+      const detectedType = hasIncomeKeywords
+        ? 'Income Certificate'
+        : hasCasteKeywords
+        ? 'Community / Caste Certificate'
+        : hasBonafideKeywords
+        ? 'Bonafide Certificate'
+        : 'Unrecognized Document';
       mismatches.push({
         field: 'Document Type Conflict',
         enteredValue: documentType,
-        extractedValue: 'Income Certificate',
-        reason: `Uploaded document appears to be an Income Certificate rather than the required Academic Mark Sheet.`,
+        extractedValue: detectedType,
+        reason: `Uploaded document does not appear to be an academic Mark Sheet. Expected keywords such as "Marks", "Semester", "CGPA", "Examination", or "Percentage Obtained" were not detected.${detectedType !== 'Unrecognized Document' ? ` The document content resembles a ${detectedType}.` : ''} Please re-upload the correct marksheet.`,
         severity: 'High',
       });
-    } else if (isCasteDoc && (hasIncomeKeywords || hasAcademicKeywords) && !hasCasteKeywords) {
+    } else if (isCasteDoc && !hasCasteKeywords) {
+      const detectedType = hasIncomeKeywords
+        ? 'Income Certificate'
+        : hasAcademicKeywords
+        ? 'Academic Mark Sheet'
+        : hasBonafideKeywords
+        ? 'Bonafide Certificate'
+        : 'Unrecognized Document';
       mismatches.push({
         field: 'Document Type Conflict',
         enteredValue: documentType,
-        extractedValue: hasIncomeKeywords ? 'Income Certificate' : 'Academic Mark Sheet',
-        reason: `Uploaded document does not appear to be a valid Community/Caste Certificate.`,
+        extractedValue: detectedType,
+        reason: `Uploaded document does not appear to be a Community / Caste Certificate. Expected keywords such as "Caste Certificate", "Scheduled Caste/Tribe", "OBC", or "Backward Class" were not detected.${detectedType !== 'Unrecognized Document' ? ` The document content resembles a ${detectedType}.` : ''} Please re-upload the correct certificate.`,
+        severity: 'High',
+      });
+    } else if (isBonafideDoc && !hasBonafideKeywords) {
+      const detectedType = hasIncomeKeywords
+        ? 'Income Certificate'
+        : hasAcademicKeywords
+        ? 'Academic Mark Sheet'
+        : hasCasteKeywords
+        ? 'Community / Caste Certificate'
+        : 'Unrecognized Document';
+      mismatches.push({
+        field: 'Document Type Conflict',
+        enteredValue: documentType,
+        extractedValue: detectedType,
+        reason: `Uploaded document does not appear to be a Bonafide Certificate. Expected keywords such as "Bonafide", "Is a student of", "Enrolled in", or "Studying in" were not detected.${detectedType !== 'Unrecognized Document' ? ` The document content resembles a ${detectedType}.` : ''} Please re-upload the correct certificate from your institution.`,
         severity: 'High',
       });
     }
-  }
 
-  // 5. Unrecognized / Irrelevant Content or Completely Blank Document
-  if (rawText.length > 25) {
-    const officialMarkers = /(?:CERTIFICATE|GOVERNMENT|BOARD|UNIVERSITY|COLLEGE|INSTITUTE|REVENUE|STUDENT|APPLICANT|MARKS|INCOME|SEAL|EXAMINATION|DEPARTMENT|MINISTRY|DISTRICT|OFFICE|TAHSILDAR|REVENUE)/i.test(rawText);
-    if (!officialMarkers && !extractedData.certificateNumber && !extractedData.studentName && !extractedData.incomeAmount && !extractedData.marks) {
-      mismatches.push({
-        field: 'Document Content Validity',
-        enteredValue: `Official ${documentType}`,
-        extractedValue: 'Unrecognized / Irrelevant Document',
-        reason: `Uploaded file does not appear to be an official ${documentType}. Neither valid certificate identifiers, student details, nor government/institutional markers were detected.`,
-        severity: 'High',
-      });
+    // Legacy guard: if none of the above type checks matched, fall back to generic irrelevant content check
+    const isKnownDocType = isIncomeDoc || isAcademicDoc || isCasteDoc || isBonafideDoc || isCollegeIdDoc;
+    if (!isKnownDocType) {
+      // For doc types we don't have keyword lists for, use the original official markers check
+      const officialMarkers = /(?:CERTIFICATE|GOVERNMENT|BOARD|UNIVERSITY|COLLEGE|INSTITUTE|REVENUE|STUDENT|APPLICANT|MARKS|INCOME|SEAL|EXAMINATION|DEPARTMENT|MINISTRY|DISTRICT|OFFICE|TAHSILDAR|REVENUE)/i.test(rawText);
+      if (!officialMarkers && !extractedData.certificateNumber && !extractedData.studentName && !extractedData.incomeAmount && !extractedData.marks) {
+        mismatches.push({
+          field: 'Document Content Validity',
+          enteredValue: `Official ${documentType}`,
+          extractedValue: 'Unrecognized / Irrelevant Document',
+          reason: `Uploaded file does not appear to be an official ${documentType}. No valid certificate identifiers, student details, or government/institutional markers were detected.`,
+          severity: 'High',
+        });
+      }
     }
   } else if (!extractedData.certificateNumber && !extractedData.studentName && !extractedData.incomeAmount && !extractedData.marks && !extractedData.qrPayload) {
+    // OCR returned nothing and no QR — truly unreadable or blank
     mismatches.push({
       field: 'Document Readability & Validity',
       enteredValue: `Readable ${documentType}`,
       extractedValue: 'Unreadable / No Data Detected',
-      reason: `Unable to extract or verify any certificate data from the uploaded file. Please ensure the document is clear, legible, and right-side up.`,
+      reason: `Unable to extract or verify any certificate data from the uploaded file. The document may be blank, corrupted, or the image quality may be too low. Please ensure the document is clear, legible, and correctly oriented before re-uploading.`,
       severity: 'Medium',
     });
   }

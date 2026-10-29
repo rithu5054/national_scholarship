@@ -204,8 +204,26 @@ const revalidateDocument = async (req, res) => {
   }
 };
 
+// Get all documents uploaded by the current student (for Profile Certificates panel)
+const getMyDocuments = async (req, res) => {
+  try {
+    const docs = await Document.find({ studentId: req.user._id })
+      .populate('applicationId', 'applicationId scholarshipId currentStage')
+      .populate({
+        path: 'applicationId',
+        populate: { path: 'scholarshipId', select: 'name' },
+      })
+      .sort({ uploadedAt: -1 });
+
+    res.json({ success: true, count: docs.length, documents: docs });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to retrieve documents.', error: err.message });
+  }
+};
+
 module.exports = {
   uploadDocument,
   getDocumentFile,
   revalidateDocument,
+  getMyDocuments,
 };

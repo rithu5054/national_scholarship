@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Mail, Phone, BookOpen, School, Percent, IndianRupee, Save, AlertCircle } from 'lucide-react';
+import { User, Mail, Phone, BookOpen, School, Percent, IndianRupee, Save, AlertCircle, FileText, ShieldCheck, Eye, CheckCircle, AlertTriangle, Clock } from 'lucide-react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
@@ -23,6 +23,19 @@ const StudentProfilePage = () => {
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState('');
   const [error, setError] = useState('');
+  const [myCertificates, setMyCertificates] = useState([]);
+
+  useEffect(() => {
+    const fetchCertificates = async () => {
+      try {
+        const res = await api.get('/documents/my-documents');
+        if (res.data.success) setMyCertificates(res.data.documents);
+      } catch (e) {
+        // non-critical; ignore
+      }
+    };
+    fetchCertificates();
+  }, []);
 
   useEffect(() => {
     if (user && profile) {
@@ -233,6 +246,93 @@ const StudentProfilePage = () => {
           </button>
         </div>
       </form>
+      {/* Certificate History Panel */}
+      <div>
+        <h2 className="text-lg font-bold text-slate-900">My Certificate History</h2>
+        <p className="text-xs text-slate-500 mt-1">
+          All documents you have uploaded across your scholarship applications. Upload new certificates through your application page.
+        </p>
+      </div>
+
+      {myCertificates.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-400 text-xs">
+          <FileText className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+          No certificates uploaded yet. Start an application to upload required documents.
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-3">
+          {myCertificates.map((doc) => {
+            const statusColor =
+              doc.currentStatus === 'Officer Verified'
+                ? 'bg-emerald-100 text-emerald-800'
+                : doc.currentStatus === 'Mismatch Detected'
+                ? 'bg-amber-100 text-amber-900'
+                : doc.currentStatus === 'Correction Required'
+                ? 'bg-amber-100 text-amber-800'
+                : doc.currentStatus === 'Pre-Verification Passed'
+                ? 'bg-blue-100 text-blue-800'
+                : doc.currentStatus === 'Manual Review Required'
+                ? 'bg-purple-100 text-purple-800'
+                : doc.currentStatus === 'Rejected'
+                ? 'bg-red-100 text-red-800'
+                : 'bg-slate-100 text-slate-600';
+
+            const StatusIcon =
+              doc.currentStatus === 'Officer Verified'
+                ? CheckCircle
+                : doc.currentStatus === 'Mismatch Detected' || doc.currentStatus === 'Correction Required'
+                ? AlertTriangle
+                : doc.currentStatus === 'Pre-Verification Passed'
+                ? ShieldCheck
+                : Clock;
+
+            const scholarshipName =
+              doc.applicationId?.scholarshipId?.name || 'Unknown Scholarship';
+
+            return (
+              <div
+                key={doc._id}
+                className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-xl border border-slate-100 bg-slate-50/50 hover:bg-slate-50 transition"
+              >
+                <div className="flex items-start gap-3">
+                  <FileText className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-slate-900">{doc.documentType}</span>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${statusColor}`}>
+                        {doc.currentStatus}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      {doc.originalFileName} • {new Date(doc.uploadedAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      For: <span className="font-medium text-slate-600">{scholarshipName}</span>
+                    </p>
+                    {doc.validationResults?.hasMismatch && (
+                      <div className="mt-1.5 space-y-1">
+                        {doc.validationResults.mismatchDetails?.map((m, mi) => (
+                          <p key={mi} className="text-[11px] text-amber-800 bg-amber-50 rounded px-2 py-1 border border-amber-100">
+                            ⚠ <strong>{m.field}:</strong> {m.reason}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <a
+                  href={`/api/documents/${doc._id}/file?token=${localStorage.getItem('scholartrack_token') || ''}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0 inline-flex items-center gap-1 text-[11px] font-semibold text-blue-600 hover:text-blue-800 hover:underline"
+                >
+                  <Eye className="w-3.5 h-3.5" /> View
+                </a>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

@@ -131,6 +131,16 @@ const ApplicationViewPage = () => {
   const isEditable = ['draft', 'correction_required'].includes(application.status);
   const requiredDocs = application.scholarshipId?.requiredDocuments || [];
 
+  // Per-doc submission readiness (for the checklist card)
+  const docReadiness = requiredDocs.map((reqDoc) => {
+    const uploaded = documents.find((d) => d.documentType === reqDoc.documentType);
+    if (!uploaded) return { docType: reqDoc.documentType, state: 'missing' };
+    if (uploaded.currentStatus === 'Mismatch Detected') return { docType: reqDoc.documentType, state: 'mismatch' };
+    if (uploaded.currentStatus === 'Manual Review Required') return { docType: reqDoc.documentType, state: 'manual' };
+    return { docType: reqDoc.documentType, state: 'ok' };
+  });
+  const allDocsReady = docReadiness.every((d) => d.state === 'ok');
+
   return (
     <div className="max-w-5xl mx-auto space-y-6">
       <button
@@ -165,13 +175,45 @@ const ApplicationViewPage = () => {
         </div>
 
         {isEditable && (
-          <button
-            onClick={handleSubmitApplication}
-            disabled={submitting}
-            className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-md shadow-blue-500/20 transition disabled:opacity-50"
-          >
-            {submitting ? 'Verifying & Submitting...' : 'Submit Application'}
-          </button>
+          <div className="flex flex-col items-end gap-2">
+            {/* Pre-submission Document Checklist */}
+            {requiredDocs.length > 0 && (
+              <div className="text-xs space-y-1 text-right">
+                {docReadiness.map((d, i) => (
+                  <div key={i} className="flex items-center gap-1.5 justify-end">
+                    {d.state === 'ok' ? (
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                    ) : d.state === 'mismatch' ? (
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                    ) : d.state === 'manual' ? (
+                      <Info className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-slate-300 shrink-0" />
+                    )}
+                    <span className={
+                      d.state === 'ok' ? 'text-emerald-700' :
+                      d.state === 'mismatch' ? 'text-amber-700 font-semibold' :
+                      d.state === 'manual' ? 'text-blue-600' :
+                      'text-slate-400'
+                    }>
+                      {d.docType}
+                      {d.state === 'mismatch' && ' — Mismatch!'}
+                      {d.state === 'missing' && ' — Not uploaded'}
+                      {d.state === 'manual' && ' — Manual review'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              onClick={handleSubmitApplication}
+              disabled={submitting || !allDocsReady}
+              title={!allDocsReady ? 'Fix all document issues before submitting' : ''}
+              className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-md shadow-blue-500/20 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {submitting ? 'Verifying & Submitting...' : 'Submit Application'}
+            </button>
+          </div>
         )}
       </div>
 
