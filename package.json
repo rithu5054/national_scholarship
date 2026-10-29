@@ -8,7 +8,8 @@
     "build": "cd client && npm install && npm run build && cd ../server && npm install",
     "start": "node server/server.js",
     "dev:server": "cd server && node server.js",
-    "dev:client": "cd client && npm run dev"
+    "dev:client": "cd client && npm run dev",
+    "deploy:live": "node server/deploy-tunnel.js"
   },
   "keywords": [
     "scholarship",
@@ -19,5 +20,8 @@
     "mongodb"
   ],
   "author": "Rohan Karthick P S",
-  "license": "ISC"
+  "license": "ISC",
+  "devDependencies": {
+    "localtunnel": "^2.0.2"
+  }
 }
