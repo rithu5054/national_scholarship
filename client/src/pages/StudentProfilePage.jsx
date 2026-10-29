@@ -100,7 +100,7 @@ const StudentProfilePage = () => {
     }
   };
 
-  const handleProfileCertificateUpload = async (documentType, file, simulatedMockData = null) => {
+  const handleProfileCertificateUpload = async (documentType, file) => {
     // Validate file type
     const allowedExtensions = ['.pdf', '.jpg', '.jpeg', '.png'];
     const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
@@ -122,9 +122,6 @@ const StudentProfilePage = () => {
       data.append('file', file);
       data.append('documentType', documentType);
       data.append('applicationId', 'profile');
-      if (simulatedMockData) {
-        data.append('mockSimulatedFields', JSON.stringify(simulatedMockData));
-      }
 
       const res = await api.post('/documents/upload', data, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -132,8 +129,8 @@ const StudentProfilePage = () => {
 
       if (res.data.success) {
         setCertActionMessage({
-          type: res.data.verificationStatus === 'Mismatch Detected' ? 'warning' : res.data.verificationStatus === 'Manual Review Required' ? 'info' : 'success',
-          text: res.data.message || `${documentType} processed.`,
+          type: 'success',
+          text: res.data.message || `${documentType} saved to your profile successfully.`,
         });
         await refreshProfile();
         await fetchCertificates();
@@ -150,11 +147,22 @@ const StudentProfilePage = () => {
 
   // Helper to find profile certificate
   const getProfileCert = (docType) => {
-    const fromProfile = profile?.certificates?.find((c) => c.documentType === docType);
+    const isIncome = docType.toLowerCase().includes('income');
+    const isMark = docType.toLowerCase().includes('mark');
+
+    const fromProfile = profile?.certificates?.find((c) =>
+      c.documentType === docType ||
+      (isIncome && c.documentType.toLowerCase().includes('income')) ||
+      (isMark && c.documentType.toLowerCase().includes('mark'))
+    );
     if (fromProfile) return fromProfile;
 
     // Fallback to myCertificates
-    const fromDocs = myCertificates.find((d) => d.documentType === docType);
+    const fromDocs = myCertificates.find((d) =>
+      d.documentType === docType ||
+      (isIncome && d.documentType.toLowerCase().includes('income')) ||
+      (isMark && d.documentType.toLowerCase().includes('mark'))
+    );
     if (fromDocs) {
       return {
         documentType: fromDocs.documentType,
@@ -163,15 +171,7 @@ const StudentProfilePage = () => {
         originalFileName: fromDocs.originalFileName,
         uploadDate: fromDocs.uploadedAt,
         version: fromDocs.version || 1,
-        extractedData: fromDocs.extractedData,
-        validationResults: fromDocs.validationResults,
-        verificationStatus: fromDocs.currentStatus === 'Officer Verified' || fromDocs.currentStatus === 'Pre-Verification Passed'
-          ? 'Verified'
-          : fromDocs.currentStatus === 'Mismatch Detected'
-          ? 'Mismatch Detected'
-          : fromDocs.currentStatus === 'Manual Review Required'
-          ? 'Manual Review Required'
-          : 'Pending Verification',
+        verificationStatus: 'Uploaded',
       };
     }
     return null;
@@ -184,35 +184,13 @@ const StudentProfilePage = () => {
       description: 'Official revenue document showing annual household income (issued by Tahsildar or Revenue Authority).',
       relevantField: 'Annual Family Income',
       profileValue: formData.annualFamilyIncome ? `₹${Number(formData.annualFamilyIncome).toLocaleString('en-IN')}` : 'Not entered',
-      mockValid: {
-        certificateNumber: 'INC-2025-984321',
-        studentName: formData.name,
-        incomeAmount: Number(formData.annualFamilyIncome) || 180000,
-        issueDate: '2025-04-12',
-      },
-      mockMismatch: {
-        certificateNumber: 'INC-MISMATCH-999',
-        studentName: formData.name,
-        incomeAmount: (Number(formData.annualFamilyIncome) || 180000) + 70000,
-        issueDate: '2025-04-12',
-      },
     },
     {
-      type: 'Mark Sheet',
+      type: 'Academic Marksheet',
       title: 'Academic Marksheet',
       description: 'Latest official semester grade transcript or examination board mark sheet.',
       relevantField: 'Academic Score',
       profileValue: formData.percentageOrCGPA ? `${formData.percentageOrCGPA}%` : 'Not entered',
-      mockValid: {
-        certificateNumber: 'MRK-2025-778899',
-        studentName: formData.name,
-        marks: Number(formData.percentageOrCGPA) || 84.5,
-      },
-      mockMismatch: {
-        certificateNumber: 'MRK-2025-00129',
-        studentName: formData.name,
-        marks: Math.max(40, (Number(formData.percentageOrCGPA) || 84.5) - 12.5),
-      },
     },
   ];
 
@@ -429,21 +407,12 @@ const StudentProfilePage = () => {
         <div className="grid md:grid-cols-2 gap-5">
           {certificateTypes.map((certItem, idx) => {
             const uploaded = getProfileCert(certItem.type);
-            const status = uploaded?.verificationStatus || 'Not Uploaded';
-            const isMismatch = status === 'Mismatch Detected';
-            const isManualReview = status === 'Manual Review Required';
-            const isVerified = status === 'Verified';
-            const mismatches = uploaded?.validationResults?.mismatchDetails || [];
 
             return (
               <div
                 key={idx}
                 className={`p-5 rounded-2xl border flex flex-col justify-between ${
-                  isMismatch
-                    ? 'bg-amber-50/50 border-amber-300'
-                    : isManualReview
-                    ? 'bg-blue-50/40 border-blue-200'
-                    : isVerified
+                  uploaded
                     ? 'bg-emerald-50/40 border-emerald-200'
                     : 'bg-slate-50/60 border-slate-200'
                 }`}
@@ -456,18 +425,12 @@ const StudentProfilePage = () => {
                     </div>
                     <span
                       className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
-                        isVerified
+                        uploaded
                           ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                          : isMismatch
-                          ? 'bg-red-100 text-red-800 border border-red-200'
-                          : isManualReview
-                          ? 'bg-amber-100 text-amber-800 border border-amber-200'
-                          : uploaded
-                          ? 'bg-blue-100 text-blue-800'
                           : 'bg-slate-200 text-slate-700'
                       }`}
                     >
-                      {status}
+                      {uploaded ? 'Uploaded' : 'Not Uploaded'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-500 mb-4">{certItem.description}</p>
@@ -483,36 +446,12 @@ const StudentProfilePage = () => {
                     <div className="space-y-2 text-xs bg-white/80 p-3 rounded-xl border border-slate-200/80 mb-3">
                       <div className="flex justify-between text-slate-600">
                         <span className="text-slate-400">File:</span>
-                        <span className="font-medium truncate max-w-[180px]">{uploaded.originalFileName}</span>
+                        <span className="font-medium truncate max-w-[200px]">{uploaded.originalFileName}</span>
                       </div>
                       <div className="flex justify-between text-slate-600">
                         <span className="text-slate-400">Uploaded:</span>
                         <span>{uploaded.uploadDate ? new Date(uploaded.uploadDate).toLocaleDateString() : 'Recently'} (v{uploaded.version || 1})</span>
                       </div>
-                      {uploaded.extractedData?.certificateNumber && (
-                        <div className="flex justify-between text-slate-600">
-                          <span className="text-slate-400">Cert ID:</span>
-                          <span className="font-mono font-bold text-slate-800">{uploaded.extractedData.certificateNumber}</span>
-                        </div>
-                      )}
-                      {uploaded.extractedData?.studentName && (
-                        <div className="flex justify-between text-slate-600">
-                          <span className="text-slate-400">Extracted Name:</span>
-                          <span className="font-semibold text-slate-800">{uploaded.extractedData.studentName}</span>
-                        </div>
-                      )}
-                      {uploaded.extractedData?.incomeAmount && (
-                        <div className="flex justify-between text-slate-600">
-                          <span className="text-slate-400">Extracted Income:</span>
-                          <span className="font-bold text-blue-700">₹{uploaded.extractedData.incomeAmount.toLocaleString('en-IN')}</span>
-                        </div>
-                      )}
-                      {uploaded.extractedData?.marks && (
-                        <div className="flex justify-between text-slate-600">
-                          <span className="text-slate-400">Extracted Marks:</span>
-                          <span className="font-bold text-blue-700">{uploaded.extractedData.marks}%</span>
-                        </div>
-                      )}
 
                       {/* Preview link */}
                       {uploaded.documentId && (
@@ -529,44 +468,13 @@ const StudentProfilePage = () => {
                       )}
                     </div>
                   )}
-
-                  {/* Mismatch Alert Box */}
-                  {isMismatch && (
-                    <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-900 mb-3 space-y-1">
-                      <div className="flex items-center gap-1.5 font-bold text-red-950">
-                        <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-                        <span>Mismatch Detected:</span>
-                      </div>
-                      {mismatches.map((m, mi) => (
-                        <div key={mi} className="text-[11px] leading-relaxed">
-                          • <strong>{m.field}:</strong> {m.reason}
-                        </div>
-                      ))}
-                      <p className="text-[10px] text-red-800 pt-1 font-medium">
-                        👉 Action: Correct your profile value above if you mistyped it, or click "Replace Certificate" below to upload the authentic document.
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Manual Review Alert Box */}
-                  {isManualReview && (
-                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 mb-3 space-y-1">
-                      <div className="flex items-center gap-1.5 font-bold text-amber-950">
-                        <Info className="w-4 h-4 text-amber-600 shrink-0" />
-                        <span>Manual Review Required:</span>
-                      </div>
-                      <p className="text-[11px] leading-relaxed">
-                        OCR could not automatically read all mandatory fields. Ensure your document is clear, unblurred, and right-side up, or replace it with a clearer copy.
-                      </p>
-                    </div>
-                  )}
                 </div>
 
-                {/* Upload & Demo Buttons */}
-                <div className="pt-3 border-t border-slate-200/60 flex items-center justify-between gap-2 flex-wrap">
+                {/* Upload or Replace Button */}
+                <div className="pt-3 border-t border-slate-200/60 flex items-center justify-between gap-2">
                   <label className="cursor-pointer px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-1.5 disabled:opacity-50">
                     <Upload className="w-3.5 h-3.5" />
-                    <span>{uploadingDocType === certItem.type ? 'Processing OCR...' : uploaded ? 'Replace Certificate' : 'Upload Certificate'}</span>
+                    <span>{uploadingDocType === certItem.type ? 'Uploading...' : uploaded ? 'Replace Certificate' : 'Upload Certificate'}</span>
                     <input
                       type="file"
                       accept=".pdf,.png,.jpg,.jpeg"
@@ -579,34 +487,7 @@ const StudentProfilePage = () => {
                       }}
                     />
                   </label>
-
-                  {/* Demo Mock Scan Buttons */}
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      title="Simulate authentic matching scan"
-                      onClick={() => {
-                        const blob = new Blob([`Official ${certItem.type} content`], { type: 'text/plain' });
-                        const testFile = new File([blob], `${certItem.type.replace(/\s+/g, '_')}_Official.png`, { type: 'image/png' });
-                        handleProfileCertificateUpload(certItem.type, testFile, certItem.mockValid);
-                      }}
-                      className="px-2 py-1 text-[10px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg transition"
-                    >
-                      [Demo Match]
-                    </button>
-                    <button
-                      type="button"
-                      title="Simulate mismatching scan"
-                      onClick={() => {
-                        const blob = new Blob([`Official ${certItem.type} content with discrepancy`], { type: 'text/plain' });
-                        const testFile = new File([blob], `${certItem.type.replace(/\s+/g, '_')}_Discrepancy.png`, { type: 'image/png' });
-                        handleProfileCertificateUpload(certItem.type, testFile, certItem.mockMismatch);
-                      }}
-                      className="px-2 py-1 text-[10px] font-semibold bg-red-50 text-red-700 hover:bg-red-100 rounded-lg transition"
-                    >
-                      [Demo Mismatch]
-                    </button>
-                  </div>
+                  <span className="text-[11px] text-slate-400 font-medium">PDF, JPG, PNG up to 10MB</span>
                 </div>
               </div>
             );

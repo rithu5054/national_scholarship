@@ -13,14 +13,14 @@ const {
 } = require('../services/documentProcessor');
 const { logAudit, createNotification } = require('../services/auditService');
 
-// Upload or Replace Document (supports both Application documents and Profile certificates)
+// Upload or Replace Document (supports Profile certificate upload and Application SHA-256 verification)
 const uploadDocument = async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Please attach a document file.' });
     }
 
-    const { applicationId, documentType, mockSimulatedFields } = req.body;
+    const { applicationId, documentType } = req.body;
     if (!documentType) {
       return res.status(400).json({ success: false, message: 'Document Type is required.' });
     }
@@ -29,78 +29,157 @@ const uploadDocument = async (req, res) => {
     const fileBuffer = fs.readFileSync(filePath);
     const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
-    // 1. Process QR Code
-    const qrResult = await scanQRCode(filePath);
-
-    // 2. Extract OCR Text
-    const ocrResult = await extractOCR(filePath);
-
-    // 3. Parse fields
-    let extractedFields = parseDocumentFields(ocrResult.text, qrResult, documentType);
-
-    // If caller provided mock simulated fields for demonstration testing
-    if (mockSimulatedFields) {
-      try {
-        const parsedMock = typeof mockSimulatedFields === 'string' ? JSON.parse(mockSimulatedFields) : mockSimulatedFields;
-        extractedFields = { ...extractedFields, ...parsedMock };
-      } catch (e) {}
-    }
-
-    extractedFields.rawOcrText = ocrResult.text ? ocrResult.text.slice(0, 1000) : '';
-    extractedFields.qrPayload = qrResult.data || null;
-    extractedFields.extractionStatus = (ocrResult.success || qrResult.detected || extractedFields.certificateNumber) ? 'Success' : 'Partial';
-
-    // Determine target context: Profile upload vs Application upload
+    // Context: Profile upload vs Application upload
     const isProfileUpload = !applicationId || applicationId === 'profile' || applicationId === 'null';
-
-    let comparisonData = {};
-    let application = null;
     let profile = await StudentProfile.findOne({ userId: req.user._id });
 
-    if (!isProfileUpload) {
-      application = await Application.findById(applicationId);
-      if (!application) {
-        return res.status(404).json({ success: false, message: 'Application not found.' });
+    if (isProfileUpload) {
+      // 1. Profile Upload Workflow
+      // Only saves document & its SHA-256 hash. No OCR, no manual review, no approval required.
+      const docQuery = { studentId: req.user._id, documentType, isProfileDocument: true };
+      let doc = await Document.findOne(docQuery);
+      let versionNum = 1;
+
+      if (doc) {
+        // Archive prior version
+        const prevCount = await DocumentVersion.countDocuments({ documentId: doc._id });
+        versionNum = prevCount + 2;
+
+        await DocumentVersion.create({
+          documentId: doc._id,
+          versionNumber: versionNum - 1,
+          storedFileName: doc.storedFileName,
+          originalFileName: doc.originalFileName,
+          uploadedBy: req.user._id,
+          correctionReason: 'Profile certificate replaced with updated copy',
+        });
+
+        doc.storedFileName = req.file.filename;
+        doc.originalFileName = req.file.originalname;
+        doc.mimeType = req.file.mimetype;
+        doc.fileSize = req.file.size;
+        doc.fileHash = fileHash;
+        doc.version = versionNum;
+        doc.currentStatus = 'Uploaded';
+        doc.uploadedAt = new Date();
+        await doc.save();
+      } else {
+        doc = new Document({
+          applicationId: null,
+          studentId: req.user._id,
+          documentType,
+          isProfileDocument: true,
+          version: 1,
+          storedFileName: req.file.filename,
+          originalFileName: req.file.originalname,
+          mimeType: req.file.mimetype,
+          fileSize: req.file.size,
+          fileHash,
+          currentStatus: 'Uploaded',
+        });
+        await doc.save();
       }
 
-      if (String(application.studentId) !== String(req.user._id) && req.user.role !== 'admin') {
-        return res.status(403).json({ success: false, message: 'Unauthorized.' });
+      // Update StudentProfile.certificates
+      if (profile) {
+        if (!profile.certificates) profile.certificates = [];
+        const certIdx = profile.certificates.findIndex((c) => c.documentType === documentType);
+        const certEntry = {
+          documentType,
+          documentId: doc._id,
+          storedFileName: req.file.filename,
+          originalFileName: req.file.originalname,
+          mimeType: req.file.mimetype,
+          fileSize: req.file.size,
+          fileHash,
+          uploadDate: new Date(),
+          version: versionNum,
+          verificationStatus: 'Uploaded',
+        };
+
+        if (certIdx >= 0) {
+          profile.certificates[certIdx] = certEntry;
+        } else {
+          profile.certificates.push(certEntry);
+        }
+        await profile.save();
       }
-      comparisonData = application.applicationData || {};
-    } else {
-      comparisonData = {
-        studentName: req.user.name,
-        annualFamilyIncome: profile ? profile.annualFamilyIncome : 0,
-        percentageOrCGPA: profile ? profile.percentageOrCGPA : 0,
-        course: profile ? profile.course : '',
-        institution: profile ? profile.institution : '',
-        category: profile ? profile.category : 'General',
-      };
+
+      await logAudit({
+        actorId: req.user._id,
+        actorRole: 'student',
+        action: 'PROFILE_CERTIFICATE_UPLOADED',
+        reason: `Uploaded profile ${documentType} (SHA-256: ${fileHash.slice(0, 12)}...)`,
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: `${documentType} saved to your profile successfully.`,
+        document: doc,
+        fileHash,
+        version: versionNum,
+      });
     }
 
-    // 4. Run Core Novelty: Automatic Mismatch Detection
-    const validation = await detectMismatches(comparisonData, extractedFields, documentType);
-
-    // Determine docStatus
-    let docStatus = 'Uploaded';
-    if (validation.hasMismatch) {
-      docStatus = 'Mismatch Detected';
-    } else if (validation.isManualReview) {
-      docStatus = 'Manual Review Required';
-    } else {
-      docStatus = 'Pre-Verification Passed';
+    // 2. Application Document Upload Workflow
+    // Compares SHA-256 hash of newly uploaded application file with corresponding profile certificate
+    const application = await Application.findById(applicationId);
+    if (!application) {
+      return res.status(404).json({ success: false, message: 'Application not found.' });
     }
 
-    // Check if an existing document record already exists (Replacement workflow)
-    const docQuery = isProfileUpload
-      ? { studentId: req.user._id, documentType, isProfileDocument: true }
-      : { applicationId, documentType };
+    if (String(application.studentId) !== String(req.user._id) && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Unauthorized.' });
+    }
 
-    let doc = await Document.findOne(docQuery);
+    // Retrieve corresponding certificate from student profile
+    const isIncome = documentType.toLowerCase().includes('income');
+    const isMark = documentType.toLowerCase().includes('mark');
+    const standardName = isIncome ? 'Income Certificate' : isMark ? 'Academic Marksheet' : documentType;
+
+    const profileCert = profile?.certificates?.find((c) =>
+      c.documentType === documentType ||
+      (isIncome && c.documentType.toLowerCase().includes('income')) ||
+      (isMark && c.documentType.toLowerCase().includes('mark'))
+    );
+
+    let isMatched = false;
+    let status = 'MISMATCH';
+    let message = '';
+
+    if (!profileCert || !profileCert.fileHash) {
+      status = 'MISMATCH';
+      message = `Please upload your ${standardName} in My Profile first.`;
+    } else if (profileCert.fileHash === fileHash) {
+      isMatched = true;
+      status = 'MATCHED';
+      message = `${standardName}: MATCHED.`;
+    } else {
+      status = 'MISMATCH';
+      if (isIncome) {
+        message = 'Income Certificate Mismatch. Please upload the same Income Certificate saved in your profile.';
+      } else if (isMark) {
+        message = 'Academic Marksheet Mismatch. Please upload the same Academic Marksheet saved in your profile.';
+      } else {
+        message = `${documentType} Mismatch. Please upload the same ${documentType} saved in your profile.`;
+      }
+    }
+
+    const validationResults = {
+      hasMismatch: !isMatched,
+      isMatched,
+      status,
+      message,
+      profileHash: profileCert?.fileHash || '',
+      appHash: fileHash,
+      mismatchDetails: !isMatched ? [{ field: documentType, reason: message }] : [],
+    };
+
+    // Save or update application document
+    let doc = await Document.findOne({ applicationId, documentType });
     let versionNum = 1;
 
     if (doc) {
-      // Archive old version
       const prevCount = await DocumentVersion.countDocuments({ documentId: doc._id });
       versionNum = prevCount + 2;
 
@@ -110,10 +189,7 @@ const uploadDocument = async (req, res) => {
         storedFileName: doc.storedFileName,
         originalFileName: doc.originalFileName,
         uploadedBy: req.user._id,
-        extractedData: doc.extractedData,
-        correctionReason: isProfileUpload
-          ? 'Profile certificate replaced with updated copy'
-          : 'Document replaced with updated copy',
+        correctionReason: 'Application document replaced with updated copy',
       });
 
       doc.storedFileName = req.file.filename;
@@ -122,100 +198,49 @@ const uploadDocument = async (req, res) => {
       doc.fileSize = req.file.size;
       doc.fileHash = fileHash;
       doc.version = versionNum;
-      doc.extractedData = extractedFields;
-      doc.validationResults = validation;
-      doc.currentStatus = docStatus;
+      doc.currentStatus = status;
+      doc.validationResults = validationResults;
       doc.uploadedAt = new Date();
       await doc.save();
     } else {
       doc = new Document({
-        applicationId: isProfileUpload ? null : applicationId,
+        applicationId,
         studentId: req.user._id,
         documentType,
-        isProfileDocument: isProfileUpload,
+        isProfileDocument: false,
         version: 1,
         storedFileName: req.file.filename,
         originalFileName: req.file.originalname,
         mimeType: req.file.mimetype,
         fileSize: req.file.size,
         fileHash,
-        extractedData: extractedFields,
-        validationResults: validation,
-        currentStatus: docStatus,
+        currentStatus: status,
+        validationResults,
       });
       await doc.save();
     }
 
-    // Sync to StudentProfile.certificates so profile always holds the latest certificate metadata
-    if (profile) {
-      if (!profile.certificates) profile.certificates = [];
-      const certIdx = profile.certificates.findIndex((c) => c.documentType === documentType);
-      const certEntry = {
-        documentType,
-        documentId: doc._id,
-        storedFileName: req.file.filename,
-        originalFileName: req.file.originalname,
-        mimeType: req.file.mimetype,
-        fileSize: req.file.size,
-        fileHash,
-        uploadDate: new Date(),
-        version: versionNum,
-        extractedData: extractedFields,
-        validationResults: validation,
-        verificationStatus: validation.verificationStatus,
-      };
-
-      if (certIdx >= 0) {
-        profile.certificates[certIdx] = certEntry;
-      } else {
-        profile.certificates.push(certEntry);
-      }
-      await profile.save();
+    // Update application stage if needed
+    if (application.currentStage === 'Draft' || application.currentStage === 'Eligibility Evaluated') {
+      application.currentStage = 'Documents Uploaded';
+      await application.save();
     }
 
-    // If this was an application upload, update application stage and audit
-    if (application) {
-      if (application.currentStage === 'Draft' || application.currentStage === 'Eligibility Evaluated') {
-        application.currentStage = 'Documents Uploaded';
-        await application.save();
-      }
-
-      await logAudit({
-        actorId: req.user._id,
-        actorRole: 'student',
-        applicationId: application._id,
-        action: 'DOCUMENT_UPLOADED',
-        reason: `Uploaded ${documentType}. Pre-verification status: ${docStatus}`,
-      });
-
-      if (validation.hasMismatch) {
-        await createNotification({
-          userId: req.user._id,
-          message: `Mismatch detected in uploaded ${documentType}. Please review the pre-verification details and correct any discrepancies.`,
-          type: 'warning',
-          applicationId: application._id,
-        });
-      }
-    } else {
-      // Profile upload audit
-      await logAudit({
-        actorId: req.user._id,
-        actorRole: 'student',
-        action: 'PROFILE_CERTIFICATE_UPLOADED',
-        reason: `Uploaded profile ${documentType}. Status: ${validation.verificationStatus}`,
-      });
-    }
+    await logAudit({
+      actorId: req.user._id,
+      actorRole: 'student',
+      applicationId: application._id,
+      action: 'DOCUMENT_UPLOADED',
+      reason: `Uploaded ${documentType} for application. Comparison result: ${status}`,
+    });
 
     res.status(201).json({
       success: true,
-      message: validation.hasMismatch
-        ? 'Document uploaded. Potential mismatch detected during verification!'
-        : validation.isManualReview
-        ? 'Document uploaded. Manual review required: OCR could not read all required details.'
-        : 'Document uploaded and verified successfully.',
+      status,
+      isMatched,
+      message,
       document: doc,
       version: versionNum,
-      verificationStatus: validation.verificationStatus,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Document upload failed.', error: err.message });
@@ -253,27 +278,59 @@ const getDocumentFile = async (req, res) => {
   }
 };
 
-// Re-run validation on demand (e.g. after correcting application field)
+// Re-run validation on demand (e.g. after updating profile document)
 const revalidateDocument = async (req, res) => {
   try {
     const { id } = req.params;
     const doc = await Document.findById(id);
     if (!doc) return res.status(404).json({ success: false, message: 'Document not found.' });
 
-    const application = await Application.findById(doc.applicationId);
-    if (!application) return res.status(404).json({ success: false, message: 'Associated application not found.' });
+    const isIncome = doc.documentType.toLowerCase().includes('income');
+    const isMark = doc.documentType.toLowerCase().includes('mark');
+    const standardName = isIncome ? 'Income Certificate' : isMark ? 'Academic Marksheet' : doc.documentType;
 
-    const validation = await detectMismatches(application.applicationData, doc.extractedData, doc.documentType);
+    const profile = await StudentProfile.findOne({ userId: doc.studentId });
+    const profileCert = profile?.certificates?.find((c) =>
+      c.documentType === doc.documentType ||
+      (isIncome && c.documentType.toLowerCase().includes('income')) ||
+      (isMark && c.documentType.toLowerCase().includes('mark'))
+    );
 
-    doc.validationResults = validation;
-    doc.currentStatus = validation.hasMismatch
-      ? 'Mismatch Detected'
-      : validation.isManualReview
-      ? 'Manual Review Required'
-      : 'Pre-Verification Passed';
+    let isMatched = false;
+    let status = 'MISMATCH';
+    let message = '';
+
+    if (!profileCert || !profileCert.fileHash) {
+      status = 'MISMATCH';
+      message = `Please upload your ${standardName} in My Profile first.`;
+    } else if (profileCert.fileHash === doc.fileHash) {
+      isMatched = true;
+      status = 'MATCHED';
+      message = `${standardName}: MATCHED.`;
+    } else {
+      status = 'MISMATCH';
+      if (isIncome) {
+        message = 'Income Certificate Mismatch. Please upload the same Income Certificate saved in your profile.';
+      } else if (isMark) {
+        message = 'Academic Marksheet Mismatch. Please upload the same Academic Marksheet saved in your profile.';
+      } else {
+        message = `${doc.documentType} Mismatch. Please upload the same ${doc.documentType} saved in your profile.`;
+      }
+    }
+
+    doc.currentStatus = status;
+    doc.validationResults = {
+      hasMismatch: !isMatched,
+      isMatched,
+      status,
+      message,
+      profileHash: profileCert?.fileHash || '',
+      appHash: doc.fileHash,
+      mismatchDetails: !isMatched ? [{ field: doc.documentType, reason: message }] : [],
+    };
     await doc.save();
 
-    res.json({ success: true, document: doc, verificationStatus: validation.verificationStatus });
+    res.json({ success: true, status, isMatched, message, document: doc });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Re-validation failed.', error: err.message });
   }

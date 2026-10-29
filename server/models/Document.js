@@ -93,6 +93,8 @@ const documentSchema = new mongoose.Schema(
       type: String,
       enum: [
         'Uploaded',
+        'MATCHED',
+        'MISMATCH',
         'Pre-Verification Passed',
         'Mismatch Detected',
         'Manual Review Required',

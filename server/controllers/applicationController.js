@@ -67,44 +67,13 @@ const createDraftApplication = async (req, res) => {
       await application.save();
     }
 
-    // Reuse verified certificates already stored in the student's profile!
-    if (profile && profile.certificates && profile.certificates.length > 0) {
-      const requiredDocs = scholarship.requiredDocuments || [];
-      for (const reqDoc of requiredDocs) {
-        const profileCert = profile.certificates.find((c) => c.documentType === reqDoc.documentType);
-        if (profileCert) {
-          const existingAppDoc = await Document.findOne({
-            applicationId: application._id,
-            documentType: reqDoc.documentType,
-          });
-
-          if (!existingAppDoc) {
-            await Document.create({
-              applicationId: application._id,
-              studentId,
-              documentType: profileCert.documentType,
-              storedFileName: profileCert.storedFileName,
-              originalFileName: profileCert.originalFileName,
-              mimeType: profileCert.mimeType,
-              fileSize: profileCert.fileSize,
-              fileHash: profileCert.fileHash,
-              version: profileCert.version || 1,
-              extractedData: profileCert.extractedData,
-              validationResults: profileCert.validationResults,
-              currentStatus: profileCert.verificationStatus === 'Verified' ? 'Pre-Verification Passed' : profileCert.verificationStatus,
-            });
-          }
-        }
-      }
-    }
-
     if (isNewDraft) {
       await logAudit({
         actorId: studentId,
         actorRole: 'student',
         applicationId: application._id,
         action: 'APPLICATION_CREATED',
-        reason: `Started draft application for ${scholarship.name}. Reused available profile certificates.`,
+        reason: `Started draft application for ${scholarship.name}.`,
       });
     }
 
@@ -183,114 +152,74 @@ const submitApplication = async (req, res) => {
       });
     }
 
-    // 2. Check required documents and auto-link profile certificates if any are missing
-    const requiredDocs = application.scholarshipId.requiredDocuments.filter((d) => d.isRequired);
-    let uploadedDocs = await Document.find({ applicationId: application._id });
+    // 2. Fetch uploaded documents for this application
+    const uploadedDocs = await Document.find({ applicationId: application._id });
 
-    // If any required doc is missing in application, try linking from profile certificates
-    if (profile && profile.certificates && profile.certificates.length > 0) {
-      for (const reqDoc of requiredDocs) {
-        const hasDoc = uploadedDocs.some((d) => d.documentType === reqDoc.documentType);
-        if (!hasDoc) {
-          const profileCert = profile.certificates.find((c) => c.documentType === reqDoc.documentType);
-          if (profileCert) {
-            const linkedDoc = await Document.create({
-              applicationId: application._id,
-              studentId: req.user._id,
-              documentType: profileCert.documentType,
-              storedFileName: profileCert.storedFileName,
-              originalFileName: profileCert.originalFileName,
-              mimeType: profileCert.mimeType,
-              fileSize: profileCert.fileSize,
-              fileHash: profileCert.fileHash,
-              version: profileCert.version || 1,
-              extractedData: profileCert.extractedData,
-              validationResults: profileCert.validationResults,
-              currentStatus: profileCert.verificationStatus === 'Verified' ? 'Pre-Verification Passed' : profileCert.verificationStatus,
-            });
-            uploadedDocs.push(linkedDoc);
-          }
-        }
-      }
-    }
-
-    const missingDocs = requiredDocs.filter(
-      (reqDoc) => !uploadedDocs.some((upDoc) => upDoc.documentType === reqDoc.documentType)
+    // Identify application documents
+    const appIncome = uploadedDocs.find(
+      (d) => d.documentType === 'Income Certificate' || d.documentType.toLowerCase().includes('income')
+    );
+    const appMarks = uploadedDocs.find(
+      (d) => d.documentType === 'Academic Marksheet' || d.documentType.toLowerCase().includes('mark')
     );
 
-    if (missingDocs.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: `Missing mandatory document(s): ${missingDocs.map((d) => d.documentType).join(', ')}. Please upload required certificates before submission.`,
-        missingDocuments: missingDocs.map((d) => d.documentType),
-      });
+    // Identify profile documents
+    const profileCerts = profile?.certificates || [];
+    const profileIncome = profileCerts.find(
+      (c) => c.documentType === 'Income Certificate' || c.documentType.toLowerCase().includes('income')
+    );
+    const profileMarks = profileCerts.find(
+      (c) => c.documentType === 'Academic Marksheet' || c.documentType.toLowerCase().includes('mark')
+    );
+
+    const errorMessages = [];
+
+    // Check if missing in profile
+    if (!profileIncome || !profileIncome.fileHash) {
+      errorMessages.push('Please upload your Income Certificate in My Profile first.');
+    }
+    if (!profileMarks || !profileMarks.fileHash) {
+      errorMessages.push('Please upload your Academic Marksheet in My Profile first.');
     }
 
-    // 3. Independently re-verify every required document to prevent stale checks
-    const comparisonSource = {
-      studentName: application.applicationData?.studentName || req.user.name,
-      annualFamilyIncome: application.applicationData?.annualFamilyIncome !== undefined
-        ? application.applicationData.annualFamilyIncome
-        : profile?.annualFamilyIncome,
-      percentageOrCGPA: application.applicationData?.percentageOrCGPA !== undefined
-        ? application.applicationData.percentageOrCGPA
-        : profile?.percentageOrCGPA,
-      course: application.applicationData?.course || profile?.course,
-      institution: application.applicationData?.institution || profile?.institution,
-    };
+    // Check if missing in application
+    if (!appIncome) {
+      errorMessages.push('Please upload your Income Certificate on the application page.');
+    }
+    if (!appMarks) {
+      errorMessages.push('Please upload your Academic Marksheet on the application page.');
+    }
 
-    const mismatchErrors = [];
-    const manualReviewErrors = [];
-
-    for (const reqDoc of requiredDocs) {
-      const doc = uploadedDocs.find((d) => d.documentType === reqDoc.documentType);
-      if (!doc) continue;
-
-      // Re-run fresh verification
-      const freshVal = await detectMismatches(comparisonSource, doc.extractedData || {}, doc.documentType);
-      doc.validationResults = freshVal;
-
-      if (freshVal.hasMismatch || doc.currentStatus === 'Mismatch Detected') {
-        doc.currentStatus = 'Mismatch Detected';
-        await doc.save();
-        mismatchErrors.push({
-          documentType: doc.documentType,
-          mismatches: freshVal.mismatchDetails,
-        });
-      } else if (freshVal.isManualReview || doc.currentStatus === 'Manual Review Required') {
-        doc.currentStatus = 'Manual Review Required';
-        await doc.save();
-        manualReviewErrors.push({
-          documentType: doc.documentType,
-          details: freshVal.mismatchDetails,
-        });
+    // If documents exist in profile and application, check hashes strictly
+    if (profileIncome && profileIncome.fileHash && appIncome) {
+      if (appIncome.fileHash !== profileIncome.fileHash) {
+        appIncome.currentStatus = 'MISMATCH';
+        await appIncome.save();
+        errorMessages.push('Income Certificate Mismatch. Please upload the same Income Certificate saved in your profile.');
       } else {
-        if (doc.currentStatus !== 'Officer Verified') {
-          doc.currentStatus = 'Pre-Verification Passed';
-          await doc.save();
-        }
+        appIncome.currentStatus = 'MATCHED';
+        await appIncome.save();
       }
     }
 
-    if (mismatchErrors.length > 0) {
-      const firstMismatch = mismatchErrors[0];
-      return res.status(400).json({
-        success: false,
-        status: 'Mismatch Detected',
-        message: `Application Submission Blocked: Your ${firstMismatch.documentType} does not match your profile details.`,
-        mismatchedDocuments: mismatchErrors.map((m) => m.documentType),
-        mismatchDetails: firstMismatch.mismatches,
-      });
+    if (profileMarks && profileMarks.fileHash && appMarks) {
+      if (appMarks.fileHash !== profileMarks.fileHash) {
+        appMarks.currentStatus = 'MISMATCH';
+        await appMarks.save();
+        errorMessages.push('Academic Marksheet Mismatch. Please upload the same Academic Marksheet saved in your profile.');
+      } else {
+        appMarks.currentStatus = 'MATCHED';
+        await appMarks.save();
+      }
     }
 
-    if (manualReviewErrors.length > 0) {
-      const firstManual = manualReviewErrors[0];
+    // Block submission if there are any errors or mismatches
+    if (errorMessages.length > 0) {
       return res.status(400).json({
         success: false,
-        status: 'Manual Review Required',
-        message: `Application Submission Blocked: Your ${firstManual.documentType} requires manual review as OCR could not reliably verify all required fields.`,
-        mismatchedDocuments: manualReviewErrors.map((m) => m.documentType),
-        mismatchDetails: firstManual.details,
+        status: 'MISMATCH',
+        message: errorMessages.join(' '),
+        errors: errorMessages,
       });
     }
 
@@ -310,7 +239,7 @@ const submitApplication = async (req, res) => {
       action: isResubmission ? 'CORRECTION_RESUBMITTED' : 'APPLICATION_SUBMITTED',
       previousStatus: prevStatus,
       newStatus: 'submitted',
-      reason: isResubmission ? 'Student resolved correction requests' : 'Application submitted for officer verification',
+      reason: isResubmission ? 'Student resolved correction requests' : 'Application submitted with verified matching profile certificates',
     });
 
     await createNotification({
@@ -322,7 +251,7 @@ const submitApplication = async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Application submitted successfully!',
+      message: 'Certificate Verification Successful. Income Certificate and Academic Marksheet match your profile documents. You can submit your application.',
       application,
     });
   } catch (err) {

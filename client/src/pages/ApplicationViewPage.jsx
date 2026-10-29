@@ -54,7 +54,7 @@ const ApplicationViewPage = () => {
     fetchApplicationData();
   }, [id]);
 
-  const handleFileUpload = async (documentType, file, simulatedMockData = null) => {
+  const handleFileUpload = async (documentType, file) => {
     try {
       setUploadingDocType(documentType);
       setStatusMessage({ type: '', text: '' });
@@ -63,9 +63,6 @@ const ApplicationViewPage = () => {
       formData.append('file', file);
       formData.append('applicationId', id);
       formData.append('documentType', documentType);
-      if (simulatedMockData) {
-        formData.append('mockSimulatedFields', JSON.stringify(simulatedMockData));
-      }
 
       const res = await api.post('/documents/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -73,8 +70,8 @@ const ApplicationViewPage = () => {
 
       if (res.data.success) {
         setStatusMessage({
-          type: res.data.document.validationResults.hasMismatch ? 'warning' : 'success',
-          text: res.data.message,
+          type: res.data.status === 'MATCHED' ? 'success' : 'error',
+          text: res.data.message || (res.data.status === 'MATCHED' ? `${documentType}: MATCHED.` : `${documentType} Mismatch.`),
         });
         await fetchApplicationData();
       }
@@ -98,7 +95,7 @@ const ApplicationViewPage = () => {
       });
       if (res.data.success) {
         setIsEditingField(false);
-        setStatusMessage({ type: 'success', text: 'Application data updated. Mismatch checks refreshed.' });
+        setStatusMessage({ type: 'success', text: 'Application data updated.' });
         await fetchApplicationData();
       }
     } catch (err) {
@@ -112,7 +109,10 @@ const ApplicationViewPage = () => {
       setStatusMessage({ type: '', text: '' });
       const res = await api.post(`/applications/${id}/submit`);
       if (res.data.success) {
-        setStatusMessage({ type: 'success', text: 'Application submitted successfully for verification!' });
+        setStatusMessage({
+          type: 'success',
+          text: res.data.message || 'Application submitted successfully!',
+        });
         await fetchApplicationData();
       }
     } catch (err) {
@@ -131,8 +131,8 @@ const ApplicationViewPage = () => {
       const res = await api.post(`/documents/${docId}/revalidate`);
       if (res.data.success) {
         setStatusMessage({
-          type: res.data.document.currentStatus === 'Mismatch Detected' ? 'warning' : 'success',
-          text: `Verification completed: ${res.data.document.currentStatus}`,
+          type: res.data.status === 'MATCHED' ? 'success' : 'error',
+          text: res.data.message || `Verification completed: ${res.data.status}`,
         });
         await fetchApplicationData();
       }
@@ -145,78 +145,40 @@ const ApplicationViewPage = () => {
   if (!application) return <div className="p-12 text-center text-slate-500">Application not found.</div>;
 
   const isEditable = ['draft', 'correction_required'].includes(application.status);
-  const requiredDocs = application.scholarshipId?.requiredDocuments || [];
 
-  // Per-doc submission readiness
-  const docReadiness = requiredDocs.map((reqDoc) => {
-    const uploaded = documents.find((d) => d.documentType === reqDoc.documentType);
-    if (!uploaded) return { docType: reqDoc.documentType, state: 'missing' };
-    if (uploaded.currentStatus === 'Mismatch Detected') return { docType: reqDoc.documentType, state: 'mismatch' };
-    if (uploaded.currentStatus === 'Manual Review Required') return { docType: reqDoc.documentType, state: 'manual' };
-    return { docType: reqDoc.documentType, state: 'ok' };
-  });
-  const allDocsReady = docReadiness.every((d) => d.state === 'ok');
+  // Helper to find documents in application
+  const getAppDoc = (type) => {
+    const isIncome = type.toLowerCase().includes('income');
+    const isMark = type.toLowerCase().includes('mark');
+    return documents.find((d) =>
+      d.documentType === type ||
+      (isIncome && d.documentType.toLowerCase().includes('income')) ||
+      (isMark && d.documentType.toLowerCase().includes('mark'))
+    );
+  };
 
-  // Detailed blocked alerts for clear feedback
-  const blockedAlerts = requiredDocs
-    .map((reqDoc) => {
-      const uploaded = documents.find((d) => d.documentType === reqDoc.documentType);
-      if (!uploaded) {
-        return {
-          type: 'missing',
-          documentType: reqDoc.documentType,
-          title: `Required Certificate Missing: ${reqDoc.documentType}`,
-          description: `This scholarship requires an authentic ${reqDoc.documentType}. Please upload it before submitting.`,
-          status: 'Not Uploaded',
-          actionType: 'upload',
-        };
-      }
+  const appCertSlots = [
+    {
+      type: 'Income Certificate',
+      title: 'Income Certificate',
+      description: 'Upload the same Income Certificate that is saved in your profile for hash verification.',
+    },
+    {
+      type: 'Academic Marksheet',
+      title: 'Academic Marksheet',
+      description: 'Upload the same Academic Marksheet that is saved in your profile for hash verification.',
+    },
+  ];
 
-      if (uploaded.currentStatus === 'Mismatch Detected') {
-        const isIncome = reqDoc.documentType.includes('Income');
-        const isMark = reqDoc.documentType.includes('Mark');
-        const hasTypeConflict = uploaded.validationResults?.mismatchDetails?.some((m) => m.field === 'Document Type Conflict');
+  const incomeDoc = getAppDoc('Income Certificate');
+  const marksDoc = getAppDoc('Academic Marksheet');
 
-        return {
-          type: 'mismatch',
-          docId: uploaded._id,
-          documentType: reqDoc.documentType,
-          title: hasTypeConflict
-            ? `Incorrect Certificate Type Uploaded for ${reqDoc.documentType}`
-            : `Your ${reqDoc.documentType} does not match your profile details.`,
-          profileLabel: isIncome ? 'Profile annual income' : isMark ? 'Profile academic score' : 'Profile value',
-          profileValue: isIncome
-            ? `₹${Number(application.applicationData?.annualFamilyIncome || 0).toLocaleString('en-IN')}`
-            : isMark
-            ? `${application.applicationData?.percentageOrCGPA || 0}%`
-            : application.applicationData?.studentName,
-          certLabel: isIncome ? 'Income shown on certificate' : isMark ? 'Score shown on certificate' : 'Certificate value',
-          certValue: isIncome
-            ? uploaded.extractedData?.incomeAmount ? `₹${Number(uploaded.extractedData.incomeAmount).toLocaleString('en-IN')}` : 'Not Detected'
-            : isMark
-            ? uploaded.extractedData?.marks ? `${uploaded.extractedData.marks}%` : 'Not Detected'
-            : uploaded.extractedData?.studentName || 'Not Detected',
-          status: 'Mismatch Detected',
-          mismatches: uploaded.validationResults?.mismatchDetails || [],
-          actionType: 'resolve',
-        };
-      }
+  const incomeMatched = incomeDoc?.currentStatus === 'MATCHED';
+  const marksMatched = marksDoc?.currentStatus === 'MATCHED';
+  const bothMatched = incomeMatched && marksMatched;
 
-      if (uploaded.currentStatus === 'Manual Review Required') {
-        return {
-          type: 'manual',
-          docId: uploaded._id,
-          documentType: reqDoc.documentType,
-          title: `OCR Unable to Read Required Details for ${reqDoc.documentType}`,
-          description: `The automated pre-verification system could not reliably read key required fields from this upload. An officer review will be required, or you can re-upload a clearer scan.`,
-          status: 'Manual Review Required',
-          actionType: 'reupload',
-        };
-      }
-
-      return null;
-    })
-    .filter(Boolean);
+  const isEligible = application.eligibilityEvaluation?.isEligible !== false;
+  const canSubmit = bothMatched && isEligible;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -253,39 +215,42 @@ const ApplicationViewPage = () => {
 
         {isEditable && (
           <div className="flex flex-col items-end gap-2">
-            {/* Pre-submission Document Checklist */}
-            {requiredDocs.length > 0 && (
-              <div className="text-xs space-y-1 text-right">
-                {docReadiness.map((d, i) => (
+            <div className="text-xs space-y-1 text-right">
+              {appCertSlots.map((slot, i) => {
+                const doc = getAppDoc(slot.type);
+                const isMatched = doc?.currentStatus === 'MATCHED';
+                const isMismatch = doc?.currentStatus === 'MISMATCH';
+                return (
                   <div key={i} className="flex items-center gap-1.5 justify-end">
-                    {d.state === 'ok' ? (
+                    {isMatched ? (
                       <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                    ) : d.state === 'mismatch' ? (
-                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                    ) : d.state === 'manual' ? (
-                      <Info className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    ) : isMismatch ? (
+                      <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
                     ) : (
-                      <XCircle className="w-3.5 h-3.5 text-slate-300 shrink-0" />
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                     )}
-                    <span className={
-                      d.state === 'ok' ? 'text-emerald-700' :
-                      d.state === 'mismatch' ? 'text-amber-700 font-semibold' :
-                      d.state === 'manual' ? 'text-blue-600' :
-                      'text-slate-400'
-                    }>
-                      {d.docType}
-                      {d.state === 'mismatch' && ' — Mismatch!'}
-                      {d.state === 'missing' && ' — Not uploaded'}
-                      {d.state === 'manual' && ' — Manual review'}
+                    <span
+                      className={
+                        isMatched
+                          ? 'text-emerald-700 font-medium'
+                          : isMismatch
+                          ? 'text-red-700 font-semibold'
+                          : 'text-slate-400'
+                      }
+                    >
+                      {slot.title}
+                      {isMatched && ' — MATCHED'}
+                      {isMismatch && ' — MISMATCH'}
+                      {!doc && ' — Not uploaded'}
                     </span>
                   </div>
-                ))}
-              </div>
-            )}
+                );
+              })}
+            </div>
             <button
               onClick={handleSubmitApplication}
-              disabled={submitting || !allDocsReady}
-              title={!allDocsReady ? 'Fix all document issues before submitting' : ''}
+              disabled={submitting || !canSubmit}
+              title={!canSubmit ? 'Both documents must show MATCHED and eligibility must be met' : ''}
               className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-md shadow-blue-500/20 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {submitting ? 'Verifying & Submitting...' : 'Submit Application'}
@@ -348,84 +313,51 @@ const ApplicationViewPage = () => {
         </div>
       </div>
 
-      {/* CLEAR SUBMISSION BLOCKED ALERTS */}
-      {isEditable && blockedAlerts.length > 0 && (
-        <div className="bg-red-50/90 border-2 border-red-300 rounded-2xl p-6 space-y-4 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-red-100 rounded-xl text-red-600">
-              <AlertTriangle className="w-6 h-6" />
+      {/* CERTIFICATE VERIFICATION ALERTS */}
+      {isEditable && (
+        <div className="space-y-3">
+          {bothMatched && (
+            <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs flex items-center gap-3">
+              <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
+              <span className="font-semibold">
+                Certificate Verification Successful. Income Certificate and Academic Marksheet match your profile documents. You can submit your application.
+              </span>
             </div>
-            <div>
-              <h2 className="text-base font-bold text-red-950">Application Submission Blocked</h2>
-              <p className="text-xs text-red-800">
-                You cannot submit this application until all required certificate checks pass. Review the issues below:
-              </p>
-            </div>
-          </div>
+          )}
 
-          <div className="space-y-3 pt-2">
-            {blockedAlerts.map((alert, bIdx) => (
-              <div key={bIdx} className="bg-white rounded-xl p-4 border border-red-200 text-xs space-y-2.5">
-                <div className="flex items-start justify-between gap-3">
-                  <h3 className="font-bold text-red-950 text-sm">{alert.title}</h3>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800 border border-red-200 shrink-0">
-                    {alert.status}
-                  </span>
-                </div>
-
-                {alert.description && <p className="text-slate-600 leading-relaxed">{alert.description}</p>}
-
-                {alert.type === 'mismatch' && (
-                  <div className="grid sm:grid-cols-2 gap-2 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
-                    <div>
-                      <span className="text-slate-400">{alert.profileLabel}:</span>
-                      <p className="font-bold text-slate-900">{alert.profileValue}</p>
-                    </div>
-                    <div>
-                      <span className="text-slate-400">{alert.certLabel}:</span>
-                      <p className="font-bold text-red-700">{alert.certValue}</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Actions */}
-                <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2 flex-wrap">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <Link
-                      to="/student/profile"
-                      className="px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 font-semibold rounded-lg text-xs transition"
-                    >
-                      Correct Profile Details
-                    </Link>
-
-                    <label className="cursor-pointer px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold rounded-lg text-xs transition flex items-center gap-1">
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>Re-upload {alert.documentType}</span>
-                      <input
-                        type="file"
-                        accept=".pdf,.png,.jpg,.jpeg"
-                        className="hidden"
-                        onChange={(e) => {
-                          if (e.target.files?.[0]) {
-                            handleFileUpload(alert.documentType, e.target.files[0]);
-                          }
-                        }}
-                      />
-                    </label>
-
-                    {alert.docId && (
-                      <button
-                        onClick={() => handleRevalidate(alert.docId)}
-                        className="px-3 py-1.5 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 font-semibold rounded-lg text-xs transition flex items-center gap-1"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" /> Verify Again
-                      </button>
-                    )}
-                  </div>
-                </div>
+          {incomeDoc && incomeDoc.currentStatus === 'MISMATCH' && (
+            <div className="p-4 rounded-xl bg-red-50 border border-red-300 text-red-900 text-xs flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <XCircle className="w-5 h-5 text-red-600 shrink-0" />
+                <span className="font-semibold">
+                  {incomeDoc.validationResults?.message || 'Income Certificate Mismatch. Please upload the same Income Certificate saved in your profile.'}
+                </span>
               </div>
-            ))}
-          </div>
+              <Link
+                to="/student/profile"
+                className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-900 font-semibold rounded-lg text-xs transition shrink-0"
+              >
+                Go to My Profile
+              </Link>
+            </div>
+          )}
+
+          {marksDoc && marksDoc.currentStatus === 'MISMATCH' && (
+            <div className="p-4 rounded-xl bg-red-50 border border-red-300 text-red-900 text-xs flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <XCircle className="w-5 h-5 text-red-600 shrink-0" />
+                <span className="font-semibold">
+                  {marksDoc.validationResults?.message || 'Academic Marksheet Mismatch. Please upload the same Academic Marksheet saved in your profile.'}
+                </span>
+              </div>
+              <Link
+                to="/student/profile"
+                className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-900 font-semibold rounded-lg text-xs transition shrink-0"
+              >
+                Go to My Profile
+              </Link>
+            </div>
+          )}
         </div>
       )}
 
@@ -505,190 +437,131 @@ const ApplicationViewPage = () => {
         )}
       </div>
 
-      {/* CORE NOVELTY: Document Pre-Verification & Mismatch Detection Dashboard */}
+      {/* Certificate Upload & Profile Hash Verification Dashboard */}
       <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-6">
         <div>
           <h2 className="text-base font-bold text-slate-900">
-            Document Upload & Automated Pre-Verification
+            Certificate Upload & Profile Hash Verification
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Automatic OCR extraction, QR authority cross-checking, and field mismatch identification.
+            Manually upload your Income Certificate and Academic Marksheet. The backend strictly verifies that each document's SHA-256 byte hash matches the corresponding document saved in your profile.
           </p>
         </div>
 
-        <div className="space-y-4">
-          {requiredDocs.map((reqDoc, idx) => {
-            const uploaded = documents.find((d) => d.documentType === reqDoc.documentType);
-            const hasMismatch = uploaded?.validationResults?.hasMismatch;
-            const mismatches = uploaded?.validationResults?.mismatchDetails || [];
-            const qrResult = uploaded?.validationResults?.qrVerification;
+        <div className="grid md:grid-cols-2 gap-5">
+          {appCertSlots.map((slot, idx) => {
+            const uploaded = getAppDoc(slot.type);
+            const isMatched = uploaded?.currentStatus === 'MATCHED';
+            const isMismatch = uploaded?.currentStatus === 'MISMATCH';
 
             return (
               <div
                 key={idx}
-                className={`p-5 rounded-2xl border ${
-                  hasMismatch
-                    ? 'bg-amber-50/40 border-amber-200'
-                    : uploaded
-                    ? 'bg-emerald-50/30 border-emerald-100'
-                    : 'bg-slate-50 border-slate-200'
+                className={`p-5 rounded-2xl border flex flex-col justify-between ${
+                  isMatched
+                    ? 'bg-emerald-50/40 border-emerald-200'
+                    : isMismatch
+                    ? 'bg-red-50/40 border-red-200'
+                    : 'bg-slate-50/60 border-slate-200'
                 }`}
               >
-                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-                  <div>
+                <div>
+                  <div className="flex items-start justify-between gap-2 mb-2">
                     <div className="flex items-center gap-2">
-                      <span className="font-bold text-sm text-slate-900">{reqDoc.documentType}</span>
-                      {uploaded ? (
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            hasMismatch
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-emerald-100 text-emerald-800'
-                          }`}
-                        >
-                          {uploaded.currentStatus}
-                        </span>
-                      ) : (
-                        <span className="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full">
-                          Not Uploaded
-                        </span>
-                      )}
+                      <FileText className="w-5 h-5 text-blue-600" />
+                      <h3 className="font-bold text-sm text-slate-900">{slot.title}</h3>
                     </div>
-                    {reqDoc.description && (
-                      <p className="text-xs text-slate-500 mt-1">{reqDoc.description}</p>
-                    )}
+                    <span
+                      className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full ${
+                        isMatched
+                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                          : isMismatch
+                          ? 'bg-red-100 text-red-800 border border-red-200'
+                          : 'bg-slate-200 text-slate-700'
+                      }`}
+                    >
+                      {uploaded ? uploaded.currentStatus : 'Not Uploaded'}
+                    </span>
                   </div>
+                  <p className="text-xs text-slate-500 mb-4">{slot.description}</p>
 
-                  {/* Upload or Replace Input */}
-                  {isEditable && (
-                    <div className="flex items-center gap-2">
-                      <label className="cursor-pointer px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-xl shadow-sm transition flex items-center gap-1.5">
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>{uploaded ? 'Replace Document' : 'Upload File'}</span>
-                        <input
-                          type="file"
-                          accept=".pdf,.png,.jpg,.jpeg"
-                          className="hidden"
-                          onChange={(e) => {
-                            if (e.target.files?.[0]) {
-                              handleFileUpload(reqDoc.documentType, e.target.files[0]);
-                            }
-                          }}
-                        />
-                      </label>
+                  {/* Uploaded File Details */}
+                  {uploaded && (
+                    <div className="space-y-2 text-xs bg-white/80 p-3 rounded-xl border border-slate-200/80 mb-3">
+                      <div className="flex justify-between text-slate-600">
+                        <span className="text-slate-400">File:</span>
+                        <span className="font-medium truncate max-w-[180px]">{uploaded.originalFileName}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-600">
+                        <span className="text-slate-400">Uploaded:</span>
+                        <span>{uploaded.uploadedAt ? new Date(uploaded.uploadedAt).toLocaleDateString() : 'Recently'}</span>
+                      </div>
 
-                      {/* Fast demo testing simulator button */}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          // Create synthetic test file
-                          const blob = new Blob(['Sample certificate content for test'], { type: 'text/plain' });
-                          const testFile = new File([blob], `${reqDoc.documentType.replace(/\s+/g, '_')}_Test.png`, { type: 'image/png' });
+                      {/* Hash Matching Status */}
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          {isMatched ? (
+                            <>
+                              <CheckCircle className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <span className="text-emerald-700 font-semibold text-[11px]">SHA-256 Hash Matched Profile</span>
+                            </>
+                          ) : (
+                            <>
+                              <XCircle className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                              <span className="text-red-700 font-semibold text-[11px]">SHA-256 Hash Mismatch</span>
+                            </>
+                          )}
+                        </div>
+                        <a
+                          href={`/api/documents/${uploaded._id}/file?token=${localStorage.getItem('scholartrack_token') || ''}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-blue-600 hover:text-blue-800 font-semibold inline-flex items-center gap-1"
+                        >
+                          <Eye className="w-3.5 h-3.5" /> Preview
+                        </a>
+                      </div>
+                    </div>
+                  )}
 
-                          let simulatedFields = {};
-                          if (reqDoc.documentType.includes('Income')) {
-                            // Simulate matching or mismatch income for test
-                            simulatedFields = {
-                              certificateNumber: 'INC-2025-984321',
-                              studentName: application.applicationData.studentName,
-                              incomeAmount: 180000,
-                            };
-                          } else if (reqDoc.documentType.includes('Mark')) {
-                            // Simulate an intentional mismatch (e.g. 72% vs entered 84.5%)
-                            simulatedFields = {
-                              certificateNumber: 'MRK-2025-778899',
-                              studentName: application.applicationData.studentName,
-                              marks: 72.0,
-                            };
-                          }
-
-                          handleFileUpload(reqDoc.documentType, testFile, simulatedFields);
-                        }}
-                        className="px-2 py-1 text-[11px] bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg transition"
-                      >
-                        [Demo Mock Scan]
-                      </button>
+                  {/* Mismatch Alert Box inside card */}
+                  {isMismatch && (
+                    <div className="p-3 rounded-xl bg-red-100/70 border border-red-300 text-xs text-red-900 mb-3 space-y-1">
+                      <p className="font-bold text-red-950">Mismatch Detected:</p>
+                      <p className="text-[11px] leading-relaxed">
+                        {uploaded.validationResults?.message || (slot.type.includes('Income') ? 'Income Certificate Mismatch. Please upload the same Income Certificate saved in your profile.' : 'Academic Marksheet Mismatch. Please upload the same Academic Marksheet saved in your profile.')}
+                      </p>
                     </div>
                   )}
                 </div>
 
-                {/* Uploaded File Metadata & OCR Findings */}
-                {uploaded && (
-                  <div className="mt-4 pt-4 border-t border-slate-200/60 space-y-3">
-                    <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span>Original File: <span className="font-medium text-slate-700">{uploaded.originalFileName}</span></span>
-                      <a
-                        href={`/api/documents/${uploaded._id}/file?token=${localStorage.getItem('scholartrack_token') || ''}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-blue-600 hover:underline flex items-center gap-1 font-semibold"
+                {/* Upload or Replace Input & Re-verify Button */}
+                {isEditable && (
+                  <div className="pt-3 border-t border-slate-200/60 flex items-center justify-between gap-2 flex-wrap">
+                    <label className="cursor-pointer px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-sm transition flex items-center gap-1.5 disabled:opacity-50">
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>{uploadingDocType === slot.type ? 'Uploading...' : uploaded ? 'Replace Document' : 'Upload Document'}</span>
+                      <input
+                        type="file"
+                        accept=".pdf,.png,.jpg,.jpeg"
+                        disabled={uploadingDocType === slot.type}
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files?.[0]) {
+                            handleFileUpload(slot.type, e.target.files[0]);
+                          }
+                        }}
+                      />
+                    </label>
+
+                    {uploaded && (
+                      <button
+                        type="button"
+                        onClick={() => handleRevalidate(uploaded._id)}
+                        className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl transition flex items-center gap-1"
                       >
-                        <Eye className="w-3.5 h-3.5" /> Preview Document
-                      </a>
-                    </div>
-
-                    {/* Extracted Details Pill */}
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-100 text-xs grid sm:grid-cols-3 gap-2">
-                      <div>
-                        <span className="text-slate-400">Extracted Certificate ID:</span>
-                        <p className="font-mono font-semibold text-slate-800">
-                          {uploaded.extractedData?.certificateNumber || 'Not Detected'}
-                        </p>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Extracted Name:</span>
-                        <p className="font-semibold text-slate-800">
-                          {uploaded.extractedData?.studentName || 'Not Detected'}
-                        </p>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Extracted Value:</span>
-                        <p className="font-semibold text-slate-800">
-                          {uploaded.extractedData?.incomeAmount
-                            ? `₹${uploaded.extractedData.incomeAmount.toLocaleString('en-IN')}`
-                            : uploaded.extractedData?.marks
-                            ? `${uploaded.extractedData.marks}%`
-                            : 'Standard Document'}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* QR Authority Status */}
-                    {qrResult && (
-                      <div className="p-2.5 rounded-xl bg-blue-50/60 border border-blue-100 text-xs flex items-center gap-2 text-blue-900">
-                        <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0" />
-                        <div>
-                          <span className="font-bold">Authority Registry: </span>
-                          <span>{qrResult.status} ({qrResult.sourceName})</span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* DETECTED MISMATCH EXPLANATION (Main Novelty) */}
-                    {hasMismatch && (
-                      <div className="p-3.5 rounded-xl bg-amber-100/70 border border-amber-300 space-y-2">
-                        <div className="flex items-center gap-2 text-amber-900 font-bold text-xs">
-                          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
-                          <span>Pre-Verification Mismatch Detected</span>
-                        </div>
-
-                        {mismatches.map((m, mIdx) => (
-                          <div key={mIdx} className="text-xs text-amber-950 space-y-1">
-                            <p className="font-semibold">{m.field} Discrepancy:</p>
-                            <p className="text-[11px] text-amber-900 leading-relaxed bg-white/70 p-2 rounded-lg border border-amber-200">
-                              {m.reason}
-                            </p>
-                            <div className="flex gap-4 text-[11px] text-amber-800">
-                              <span>Application Value: <strong className="text-amber-950">{m.enteredValue}</strong></span>
-                              <span>Extracted Value: <strong className="text-amber-950">{m.extractedValue}</strong></span>
-                            </div>
-                          </div>
-                        ))}
-
-                        <div className="pt-2 text-[11px] text-amber-800 font-medium">
-                          💡 <strong>Guided Solution:</strong> Use the "Edit Application Values" button above if you mis-typed the number, or click "Replace Document" to attach the authentic certificate.
-                        </div>
-                      </div>
+                        <RefreshCw className="w-3.5 h-3.5" /> Verify Against Profile
+                      </button>
                     )}
                   </div>
                 )}
