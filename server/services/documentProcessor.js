@@ -144,6 +144,8 @@ const normalizeText = (str) => {
  */
 const detectMismatches = async (applicationData, extractedData, documentType) => {
   const mismatches = [];
+  const rawText = (extractedData.rawOcrText || '').toUpperCase();
+  const docTypeUpper = (documentType || '').toUpperCase();
 
   // 1. Name Comparison
   if (extractedData.studentName && applicationData.studentName) {
@@ -157,7 +159,7 @@ const detectMismatches = async (applicationData, extractedData, documentType) =>
         field: 'Student Name',
         enteredValue: applicationData.studentName,
         extractedValue: extractedData.studentName,
-        reason: `Student name in application ('${applicationData.studentName}') does not match the name extracted from ${documentType} ('${extractedData.studentName}').`,
+        reason: `Student name in application ('${applicationData.studentName}') does not match the name extracted from ${documentType} ('${extractedData.studentName}'). Document may belong to another person.`,
         severity: 'High',
       });
     }
@@ -196,7 +198,66 @@ const detectMismatches = async (applicationData, extractedData, documentType) =>
     }
   }
 
-  // 4. Verification against Configured Authority
+  // 4. Document Type Conflict Detection (e.g. uploading mark sheet under income slot or vice versa)
+  if (rawText.length > 25) {
+    const isIncomeDoc = docTypeUpper.includes('INCOME');
+    const isAcademicDoc = docTypeUpper.includes('MARK') || docTypeUpper.includes('GRADE') || docTypeUpper.includes('TRANSCRIPT');
+    const isCasteDoc = docTypeUpper.includes('CASTE') || docTypeUpper.includes('COMMUNITY');
+
+    const hasAcademicKeywords = /(?:MARKSHEET|MARK\s*SHEET|EXAMINATION|SEMESTER|CREDITS|CGPA|GRADE\s*CARD|TRANSCRIPT|TOTAL\s*MARKS)/i.test(rawText);
+    const hasIncomeKeywords = /(?:INCOME\s*CERTIFICATE|ANNUAL\s*INCOME|TAHSILDAR|REVENUE\s*DEPARTMENT|PATWARI|TALUK)/i.test(rawText);
+    const hasCasteKeywords = /(?:CASTE\s*CERTIFICATE|COMMUNITY\s*CERTIFICATE|SCHEDULED\s*CASTE|SCHEDULED\s*TRIBE|OBC|BACKWARD\s*CLASS)/i.test(rawText);
+
+    if (isIncomeDoc && hasAcademicKeywords && !hasIncomeKeywords) {
+      mismatches.push({
+        field: 'Document Type Conflict',
+        enteredValue: documentType,
+        extractedValue: 'Academic Mark Sheet / Transcript',
+        reason: `Uploaded document appears to be an Academic Mark Sheet rather than the required Income Certificate.`,
+        severity: 'High',
+      });
+    } else if (isAcademicDoc && hasIncomeKeywords && !hasAcademicKeywords) {
+      mismatches.push({
+        field: 'Document Type Conflict',
+        enteredValue: documentType,
+        extractedValue: 'Income Certificate',
+        reason: `Uploaded document appears to be an Income Certificate rather than the required Academic Mark Sheet.`,
+        severity: 'High',
+      });
+    } else if (isCasteDoc && (hasIncomeKeywords || hasAcademicKeywords) && !hasCasteKeywords) {
+      mismatches.push({
+        field: 'Document Type Conflict',
+        enteredValue: documentType,
+        extractedValue: hasIncomeKeywords ? 'Income Certificate' : 'Academic Mark Sheet',
+        reason: `Uploaded document does not appear to be a valid Community/Caste Certificate.`,
+        severity: 'High',
+      });
+    }
+  }
+
+  // 5. Unrecognized / Irrelevant Content or Completely Blank Document
+  if (rawText.length > 25) {
+    const officialMarkers = /(?:CERTIFICATE|GOVERNMENT|BOARD|UNIVERSITY|COLLEGE|INSTITUTE|REVENUE|STUDENT|APPLICANT|MARKS|INCOME|SEAL|EXAMINATION|DEPARTMENT|MINISTRY|DISTRICT|OFFICE|TAHSILDAR|REVENUE)/i.test(rawText);
+    if (!officialMarkers && !extractedData.certificateNumber && !extractedData.studentName && !extractedData.incomeAmount && !extractedData.marks) {
+      mismatches.push({
+        field: 'Document Content Validity',
+        enteredValue: `Official ${documentType}`,
+        extractedValue: 'Unrecognized / Irrelevant Document',
+        reason: `Uploaded file does not appear to be an official ${documentType}. Neither valid certificate identifiers, student details, nor government/institutional markers were detected.`,
+        severity: 'High',
+      });
+    }
+  } else if (!extractedData.certificateNumber && !extractedData.studentName && !extractedData.incomeAmount && !extractedData.marks && !extractedData.qrPayload) {
+    mismatches.push({
+      field: 'Document Readability & Validity',
+      enteredValue: `Readable ${documentType}`,
+      extractedValue: 'Unreadable / No Data Detected',
+      reason: `Unable to extract or verify any certificate data from the uploaded file. Please ensure the document is clear, legible, and right-side up.`,
+      severity: 'Medium',
+    });
+  }
+
+  // 6. Verification against Configured Authority
   let qrVerificationResult = {
     status: 'No QR Detected',
     sourceName: 'Mock Verification Registry',
@@ -211,7 +272,15 @@ const detectMismatches = async (applicationData, extractedData, documentType) =>
       details: authCheck.message,
     };
 
-    if (authCheck.record) {
+    if (authCheck.status === 'Certificate Not Found') {
+      mismatches.push({
+        field: 'Registry Verification',
+        enteredValue: `Certificate ID: ${extractedData.certificateNumber}`,
+        extractedValue: 'Unregistered / Invalid Record',
+        reason: `Certificate identifier '${extractedData.certificateNumber}' was not found in the official verification registry. Potential invalid or unverified document.`,
+        severity: 'High',
+      });
+    } else if (authCheck.record) {
       // Cross check authority record with application data
       if (authCheck.record.studentName) {
         const appNorm = normalizeText(applicationData.studentName);
@@ -235,6 +304,19 @@ const detectMismatches = async (applicationData, extractedData, documentType) =>
             enteredValue: `₹${appIncome.toLocaleString('en-IN')}`,
             extractedValue: `₹${authCheck.record.incomeAmount.toLocaleString('en-IN')}`,
             reason: `Entered income differs from official record retrieved from authority registry.`,
+            severity: 'High',
+          });
+        }
+      }
+
+      if (authCheck.record.marks) {
+        const appMarks = Number(applicationData.percentageOrCGPA);
+        if (Math.abs(appMarks - authCheck.record.marks) > 0.5) {
+          mismatches.push({
+            field: 'Authority Registry Marks',
+            enteredValue: `${appMarks}%`,
+            extractedValue: `${authCheck.record.marks}%`,
+            reason: `Academic score differs from official record retrieved from examination board registry.`,
             severity: 'High',
           });
         }
