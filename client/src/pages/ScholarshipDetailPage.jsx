@@ -16,7 +16,7 @@ import { useAuth } from '../context/AuthContext';
 const ScholarshipDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
 
   const [scholarship, setScholarship] = useState(null);
   const [evaluation, setEvaluation] = useState(null);
@@ -163,17 +163,49 @@ const ScholarshipDetailPage = () => {
 
       {/* Mandatory Documents Checklist */}
       <div className="bg-white rounded-2xl border border-slate-200 p-6">
-        <h2 className="text-lg font-bold text-slate-900 mb-4">Required Documents Checklist</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-bold text-slate-900">Required Documents Checklist</h2>
+          <span className="text-[11px] text-slate-500">Verified profile certificates will be automatically attached</span>
+        </div>
         <div className="grid sm:grid-cols-2 gap-3">
-          {scholarship.requiredDocuments?.map((doc, idx) => (
-            <div key={idx} className="p-3 rounded-xl bg-slate-50 border border-slate-100 flex items-center gap-3">
-              <FileText className="w-4 h-4 text-blue-600" />
-              <div>
-                <p className="text-xs font-semibold text-slate-900">{doc.documentType}</p>
-                {doc.description && <p className="text-[11px] text-slate-500">{doc.description}</p>}
+          {scholarship.requiredDocuments?.map((doc, idx) => {
+            const profileCert = profile?.certificates?.find((c) => c.documentType === doc.documentType);
+            const isVerified = profileCert?.verificationStatus === 'Verified';
+            const isMismatch = profileCert?.verificationStatus === 'Mismatch Detected';
+            const isManual = profileCert?.verificationStatus === 'Manual Review Required';
+
+            return (
+              <div key={idx} className="p-3.5 rounded-xl bg-slate-50 border border-slate-100 flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2.5">
+                  <FileText className="w-4 h-4 text-blue-600 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-semibold text-slate-900">{doc.documentType}</p>
+                    {doc.description && <p className="text-[11px] text-slate-500 mt-0.5">{doc.description}</p>}
+                  </div>
+                </div>
+
+                {profileCert ? (
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                      isVerified
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : isMismatch
+                        ? 'bg-red-100 text-red-800'
+                        : isManual
+                        ? 'bg-amber-100 text-amber-800'
+                        : 'bg-blue-100 text-blue-800'
+                    }`}
+                  >
+                    {isVerified ? '✓ Verified in Profile' : isMismatch ? '⚠ Profile Mismatch' : profileCert.verificationStatus}
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 shrink-0">
+                    Not in Profile
+                  </span>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 

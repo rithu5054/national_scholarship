@@ -4,8 +4,9 @@ const StudentProfile = require('../models/StudentProfile');
 const Document = require('../models/Document');
 const { evaluateEligibility } = require('../services/eligibilityEngine');
 const { logAudit, createNotification } = require('../services/auditService');
+const { detectMismatches } = require('../services/documentProcessor');
 
-// Create Draft Application
+// Create Draft Application (reuses verified profile certificates automatically)
 const createDraftApplication = async (req, res) => {
   try {
     const { scholarshipId } = req.body;
@@ -30,51 +31,84 @@ const createDraftApplication = async (req, res) => {
       });
     }
 
-    // Check if an existing draft exists
-    let application = await Application.findOne({ studentId, scholarshipId, status: 'draft' });
-    if (application) {
-      return res.json({ success: true, message: 'Draft retrieved.', application });
-    }
-
     const profile = await StudentProfile.findOne({ userId: studentId });
     const evaluation = profile ? evaluateEligibility(scholarship, profile) : null;
 
-    const appNumber = `APP-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+    // Check if an existing draft exists
+    let application = await Application.findOne({ studentId, scholarshipId, status: 'draft' });
+    let isNewDraft = false;
 
-    application = new Application({
-      applicationId: appNumber,
-      studentId,
-      scholarshipId,
-      applicationData: {
-        studentName: req.user.name,
-        email: req.user.email,
-        phone: req.user.phone || '',
-        studentIdNumber: profile ? profile.studentId : '',
-        course: profile ? profile.course : '',
-        academicYear: profile ? profile.academicYear : '',
-        institution: profile ? profile.institution : '',
-        percentageOrCGPA: profile ? profile.percentageOrCGPA : 0,
-        annualFamilyIncome: profile ? profile.annualFamilyIncome : 0,
-        category: profile ? profile.category : 'General',
-        gender: profile ? profile.gender : '',
-        disabilityStatus: profile ? profile.disabilityStatus : 'No',
-      },
-      eligibilityEvaluation: evaluation,
-      currentStage: evaluation && evaluation.isEligible ? 'Eligibility Evaluated' : 'Draft',
-      status: 'draft',
-    });
+    if (!application) {
+      isNewDraft = true;
+      const appNumber = `APP-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
 
-    await application.save();
+      application = new Application({
+        applicationId: appNumber,
+        studentId,
+        scholarshipId,
+        applicationData: {
+          studentName: req.user.name,
+          email: req.user.email,
+          phone: req.user.phone || '',
+          studentIdNumber: profile ? profile.studentId : '',
+          course: profile ? profile.course : '',
+          academicYear: profile ? profile.academicYear : '',
+          institution: profile ? profile.institution : '',
+          percentageOrCGPA: profile ? profile.percentageOrCGPA : 0,
+          annualFamilyIncome: profile ? profile.annualFamilyIncome : 0,
+          category: profile ? profile.category : 'General',
+          gender: profile ? profile.gender : '',
+          disabilityStatus: profile ? profile.disabilityStatus : 'No',
+        },
+        eligibilityEvaluation: evaluation,
+        currentStage: evaluation && evaluation.isEligible ? 'Eligibility Evaluated' : 'Draft',
+        status: 'draft',
+      });
+      await application.save();
+    }
 
-    await logAudit({
-      actorId: studentId,
-      actorRole: 'student',
-      applicationId: application._id,
-      action: 'APPLICATION_CREATED',
-      reason: `Started draft application for ${scholarship.name}`,
-    });
+    // Reuse verified certificates already stored in the student's profile!
+    if (profile && profile.certificates && profile.certificates.length > 0) {
+      const requiredDocs = scholarship.requiredDocuments || [];
+      for (const reqDoc of requiredDocs) {
+        const profileCert = profile.certificates.find((c) => c.documentType === reqDoc.documentType);
+        if (profileCert) {
+          const existingAppDoc = await Document.findOne({
+            applicationId: application._id,
+            documentType: reqDoc.documentType,
+          });
 
-    res.status(201).json({ success: true, application });
+          if (!existingAppDoc) {
+            await Document.create({
+              applicationId: application._id,
+              studentId,
+              documentType: profileCert.documentType,
+              storedFileName: profileCert.storedFileName,
+              originalFileName: profileCert.originalFileName,
+              mimeType: profileCert.mimeType,
+              fileSize: profileCert.fileSize,
+              fileHash: profileCert.fileHash,
+              version: profileCert.version || 1,
+              extractedData: profileCert.extractedData,
+              validationResults: profileCert.validationResults,
+              currentStatus: profileCert.verificationStatus === 'Verified' ? 'Pre-Verification Passed' : profileCert.verificationStatus,
+            });
+          }
+        }
+      }
+    }
+
+    if (isNewDraft) {
+      await logAudit({
+        actorId: studentId,
+        actorRole: 'student',
+        applicationId: application._id,
+        action: 'APPLICATION_CREATED',
+        reason: `Started draft application for ${scholarship.name}. Reused available profile certificates.`,
+      });
+    }
+
+    res.status(isNewDraft ? 201 : 200).json({ success: true, application });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to create application draft.', error: err.message });
   }
@@ -138,18 +172,47 @@ const submitApplication = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Application has already been submitted.' });
     }
 
-    // 1. Verify eligibility
-    if (!application.eligibilityEvaluation || !application.eligibilityEvaluation.isEligible) {
+    // 1. Verify eligibility independently against latest criteria
+    const profile = await StudentProfile.findOne({ userId: req.user._id });
+    const freshEligibility = evaluateEligibility(application.scholarshipId, application.applicationData || profile);
+    if (!freshEligibility.isEligible) {
       return res.status(400).json({
         success: false,
         message: 'Cannot submit application: Configured eligibility criteria are not met.',
-        reasons: application.eligibilityEvaluation ? application.eligibilityEvaluation.reasons : ['Eligibility unverified'],
+        reasons: freshEligibility.reasons,
       });
     }
 
-    // 2. Check required documents
+    // 2. Check required documents and auto-link profile certificates if any are missing
     const requiredDocs = application.scholarshipId.requiredDocuments.filter((d) => d.isRequired);
-    const uploadedDocs = await Document.find({ applicationId: application._id });
+    let uploadedDocs = await Document.find({ applicationId: application._id });
+
+    // If any required doc is missing in application, try linking from profile certificates
+    if (profile && profile.certificates && profile.certificates.length > 0) {
+      for (const reqDoc of requiredDocs) {
+        const hasDoc = uploadedDocs.some((d) => d.documentType === reqDoc.documentType);
+        if (!hasDoc) {
+          const profileCert = profile.certificates.find((c) => c.documentType === reqDoc.documentType);
+          if (profileCert) {
+            const linkedDoc = await Document.create({
+              applicationId: application._id,
+              studentId: req.user._id,
+              documentType: profileCert.documentType,
+              storedFileName: profileCert.storedFileName,
+              originalFileName: profileCert.originalFileName,
+              mimeType: profileCert.mimeType,
+              fileSize: profileCert.fileSize,
+              fileHash: profileCert.fileHash,
+              version: profileCert.version || 1,
+              extractedData: profileCert.extractedData,
+              validationResults: profileCert.validationResults,
+              currentStatus: profileCert.verificationStatus === 'Verified' ? 'Pre-Verification Passed' : profileCert.verificationStatus,
+            });
+            uploadedDocs.push(linkedDoc);
+          }
+        }
+      }
+    }
 
     const missingDocs = requiredDocs.filter(
       (reqDoc) => !uploadedDocs.some((upDoc) => upDoc.documentType === reqDoc.documentType)
@@ -158,20 +221,76 @@ const submitApplication = async (req, res) => {
     if (missingDocs.length > 0) {
       return res.status(400).json({
         success: false,
-        message: `Missing mandatory document(s): ${missingDocs.map((d) => d.documentType).join(', ')}`,
+        message: `Missing mandatory document(s): ${missingDocs.map((d) => d.documentType).join(', ')}. Please upload required certificates before submission.`,
+        missingDocuments: missingDocs.map((d) => d.documentType),
       });
     }
 
-    // 3. Check for unresolved high-severity mismatches
-    const unresolvedMismatches = uploadedDocs.filter(
-      (doc) => doc.validationResults && doc.validationResults.hasMismatch && doc.currentStatus === 'Mismatch Detected'
-    );
+    // 3. Independently re-verify every required document to prevent stale checks
+    const comparisonSource = {
+      studentName: application.applicationData?.studentName || req.user.name,
+      annualFamilyIncome: application.applicationData?.annualFamilyIncome !== undefined
+        ? application.applicationData.annualFamilyIncome
+        : profile?.annualFamilyIncome,
+      percentageOrCGPA: application.applicationData?.percentageOrCGPA !== undefined
+        ? application.applicationData.percentageOrCGPA
+        : profile?.percentageOrCGPA,
+      course: application.applicationData?.course || profile?.course,
+      institution: application.applicationData?.institution || profile?.institution,
+    };
 
-    if (unresolvedMismatches.length > 0) {
+    const mismatchErrors = [];
+    const manualReviewErrors = [];
+
+    for (const reqDoc of requiredDocs) {
+      const doc = uploadedDocs.find((d) => d.documentType === reqDoc.documentType);
+      if (!doc) continue;
+
+      // Re-run fresh verification
+      const freshVal = await detectMismatches(comparisonSource, doc.extractedData || {}, doc.documentType);
+      doc.validationResults = freshVal;
+
+      if (freshVal.hasMismatch || doc.currentStatus === 'Mismatch Detected') {
+        doc.currentStatus = 'Mismatch Detected';
+        await doc.save();
+        mismatchErrors.push({
+          documentType: doc.documentType,
+          mismatches: freshVal.mismatchDetails,
+        });
+      } else if (freshVal.isManualReview || doc.currentStatus === 'Manual Review Required') {
+        doc.currentStatus = 'Manual Review Required';
+        await doc.save();
+        manualReviewErrors.push({
+          documentType: doc.documentType,
+          details: freshVal.mismatchDetails,
+        });
+      } else {
+        if (doc.currentStatus !== 'Officer Verified') {
+          doc.currentStatus = 'Pre-Verification Passed';
+          await doc.save();
+        }
+      }
+    }
+
+    if (mismatchErrors.length > 0) {
+      const firstMismatch = mismatchErrors[0];
       return res.status(400).json({
         success: false,
-        message: 'Pre-verification blocked: One or more uploaded documents have detected mismatches. Please review the mismatch explanations and correct or re-upload the documents before submission.',
-        mismatchedDocuments: unresolvedMismatches.map((d) => d.documentType),
+        status: 'Mismatch Detected',
+        message: `Application Submission Blocked: Your ${firstMismatch.documentType} does not match your profile details.`,
+        mismatchedDocuments: mismatchErrors.map((m) => m.documentType),
+        mismatchDetails: firstMismatch.mismatches,
+      });
+    }
+
+    if (manualReviewErrors.length > 0) {
+      const firstManual = manualReviewErrors[0];
+      return res.status(400).json({
+        success: false,
+        status: 'Manual Review Required',
+        message: `Application Submission Blocked: Your ${firstManual.documentType} requires manual review as OCR could not reliably verify all required fields.`,
+        mismatchedDocuments: manualReviewErrors.map((m) => m.documentType),
+        mismatchDetails: firstManual.details,
       });
     }
 
@@ -232,7 +351,58 @@ const getApplicationDetails = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied.' });
     }
 
-    const documents = await Document.find({ applicationId: application._id });
+    let documents = await Document.find({ applicationId: application._id });
+
+    // In draft state, auto-sync/link any fresh certificates from student profile
+    if (req.user.role === 'student' && application.status === 'draft') {
+      const profile = await StudentProfile.findOne({ userId: req.user._id });
+      if (profile && profile.certificates && profile.certificates.length > 0 && application.scholarshipId) {
+        const requiredDocs = application.scholarshipId.requiredDocuments || [];
+        let modified = false;
+
+        for (const reqDoc of requiredDocs) {
+          const existingDoc = documents.find((d) => d.documentType === reqDoc.documentType);
+          const profileCert = profile.certificates.find((c) => c.documentType === reqDoc.documentType);
+
+          if (profileCert) {
+            if (!existingDoc) {
+              await Document.create({
+                applicationId: application._id,
+                studentId: req.user._id,
+                documentType: profileCert.documentType,
+                storedFileName: profileCert.storedFileName,
+                originalFileName: profileCert.originalFileName,
+                mimeType: profileCert.mimeType,
+                fileSize: profileCert.fileSize,
+                fileHash: profileCert.fileHash,
+                version: profileCert.version || 1,
+                extractedData: profileCert.extractedData,
+                validationResults: profileCert.validationResults,
+                currentStatus: profileCert.verificationStatus === 'Verified' ? 'Pre-Verification Passed' : profileCert.verificationStatus,
+              });
+              modified = true;
+            } else if ((existingDoc.version || 1) < (profileCert.version || 1)) {
+              existingDoc.storedFileName = profileCert.storedFileName;
+              existingDoc.originalFileName = profileCert.originalFileName;
+              existingDoc.mimeType = profileCert.mimeType;
+              existingDoc.fileSize = profileCert.fileSize;
+              existingDoc.fileHash = profileCert.fileHash;
+              existingDoc.version = profileCert.version;
+              existingDoc.extractedData = profileCert.extractedData;
+              existingDoc.validationResults = profileCert.validationResults;
+              existingDoc.currentStatus = profileCert.verificationStatus === 'Verified' ? 'Pre-Verification Passed' : profileCert.verificationStatus;
+              await existingDoc.save();
+              modified = true;
+            }
+          }
+        }
+
+        if (modified) {
+          documents = await Document.find({ applicationId: application._id });
+        }
+      }
+    }
+
     res.json({ success: true, application, documents });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to retrieve application.', error: err.message });

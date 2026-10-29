@@ -127,6 +127,18 @@ const parseDocumentFields = (ocrText, qrResult, documentType) => {
     }
   }
 
+  // Extract Institution / Course
+  if (!extracted.institutionName) {
+    const instMatch = text.match(/(?:COLLEGE|INSTITUTE|UNIVERSITY|SCHOOL)[:\s]*([A-Z\s]{4,50})/i);
+    if (instMatch) extracted.institutionName = instMatch[1].trim();
+  }
+
+  // Extract Issue Date
+  if (!extracted.issueDate) {
+    const dateMatch = text.match(/(?:DATE|DATED|ISSUE\s*DATE)[:\s]*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{2,4})/i);
+    if (dateMatch) extracted.issueDate = dateMatch[1].trim();
+  }
+
   return extracted;
 };
 
@@ -139,13 +151,15 @@ const normalizeText = (str) => {
 };
 
 /**
- * Compare application data against extracted document data
+ * Compare application or profile data against extracted document data
  * Core Novelty of ScholarTrack
  */
 const detectMismatches = async (applicationData, extractedData, documentType) => {
   const mismatches = [];
   const rawText = (extractedData.rawOcrText || '').toUpperCase();
   const docTypeUpper = (documentType || '').toUpperCase();
+  const isIncomeDoc = docTypeUpper.includes('INCOME');
+  const isAcademicDoc = docTypeUpper.includes('MARK') || docTypeUpper.includes('GRADE') || docTypeUpper.includes('TRANSCRIPT');
 
   // 1. Name Comparison
   if (extractedData.studentName && applicationData.studentName) {
@@ -159,41 +173,65 @@ const detectMismatches = async (applicationData, extractedData, documentType) =>
         field: 'Student Name',
         enteredValue: applicationData.studentName,
         extractedValue: extractedData.studentName,
-        reason: `Student name in application ('${applicationData.studentName}') does not match the name extracted from ${documentType} ('${extractedData.studentName}'). Document may belong to another person.`,
+        reason: `Student name in application/profile ('${applicationData.studentName}') does not match the name extracted from ${documentType} ('${extractedData.studentName}'). Document may belong to another person.`,
         severity: 'High',
       });
     }
   }
 
   // 2. Annual Family Income Comparison
-  if (extractedData.incomeAmount && applicationData.annualFamilyIncome !== undefined) {
-    const appIncome = Number(applicationData.annualFamilyIncome);
-    const docIncome = Number(extractedData.incomeAmount);
+  if (isIncomeDoc) {
+    if (extractedData.incomeAmount !== null && extractedData.incomeAmount !== undefined && applicationData.annualFamilyIncome !== undefined) {
+      const appIncome = Number(applicationData.annualFamilyIncome);
+      const docIncome = Number(extractedData.incomeAmount);
 
-    // If difference is more than 5% or 1000 INR
-    if (Math.abs(appIncome - docIncome) > 1000) {
+      // If difference is more than 1000 INR
+      if (Math.abs(appIncome - docIncome) > 1000) {
+        mismatches.push({
+          field: 'Annual Family Income',
+          enteredValue: `₹${appIncome.toLocaleString('en-IN')}`,
+          extractedValue: `₹${docIncome.toLocaleString('en-IN')}`,
+          reason: `Profile/application states annual income of ₹${appIncome.toLocaleString('en-IN')}, but uploaded certificate indicates ₹${docIncome.toLocaleString('en-IN')}.`,
+          severity: 'High',
+        });
+      }
+    } else if (rawText.length > 25 && (extractedData.incomeAmount === null || extractedData.incomeAmount === undefined)) {
+      // OCR could not read the required income figure
       mismatches.push({
         field: 'Annual Family Income',
-        enteredValue: `₹${appIncome.toLocaleString('en-IN')}`,
-        extractedValue: `₹${docIncome.toLocaleString('en-IN')}`,
-        reason: `Application states annual income of ₹${appIncome.toLocaleString('en-IN')}, but uploaded certificate appears to indicate ₹${docIncome.toLocaleString('en-IN')}.`,
-        severity: 'High',
+        enteredValue: applicationData.annualFamilyIncome !== undefined ? `₹${Number(applicationData.annualFamilyIncome).toLocaleString('en-IN')}` : 'Not Specified',
+        extractedValue: 'OCR Unreadable / Not Extracted',
+        reason: 'OCR could not reliably extract the annual family income figure from the uploaded certificate. Manual officer review is required.',
+        severity: 'Medium',
+        requiresManualReview: true,
       });
     }
   }
 
   // 3. Academic Marks Comparison
-  if (extractedData.marks && applicationData.percentageOrCGPA !== undefined) {
-    const appMarks = Number(applicationData.percentageOrCGPA);
-    const docMarks = Number(extractedData.marks);
+  if (isAcademicDoc) {
+    if (extractedData.marks !== null && extractedData.marks !== undefined && applicationData.percentageOrCGPA !== undefined) {
+      const appMarks = Number(applicationData.percentageOrCGPA);
+      const docMarks = Number(extractedData.marks);
 
-    if (Math.abs(appMarks - docMarks) > 0.5) {
+      if (Math.abs(appMarks - docMarks) > 0.5) {
+        mismatches.push({
+          field: 'Academic Marks / Percentage',
+          enteredValue: `${appMarks}%`,
+          extractedValue: `${docMarks}%`,
+          reason: `Profile/application academic score (${appMarks}%) differs from the score extracted from the mark sheet (${docMarks}%).`,
+          severity: 'High',
+        });
+      }
+    } else if (rawText.length > 25 && (extractedData.marks === null || extractedData.marks === undefined)) {
+      // OCR could not read the required marks figure
       mismatches.push({
         field: 'Academic Marks / Percentage',
-        enteredValue: `${appMarks}%`,
-        extractedValue: `${docMarks}%`,
-        reason: `Application academic score (${appMarks}%) differs from the score extracted from the mark sheet (${docMarks}%).`,
-        severity: 'High',
+        enteredValue: applicationData.percentageOrCGPA !== undefined ? `${applicationData.percentageOrCGPA}%` : 'Not Specified',
+        extractedValue: 'OCR Unreadable / Not Extracted',
+        reason: 'OCR could not reliably extract academic marks or percentage from the uploaded mark sheet. Manual officer review is required.',
+        severity: 'Medium',
+        requiresManualReview: true,
       });
     }
   }
@@ -371,11 +409,23 @@ const detectMismatches = async (applicationData, extractedData, documentType) =>
     }
   }
 
+  const hasHardMismatch = mismatches.some((m) => m.severity === 'High');
+  const isManualReview = mismatches.some((m) => m.severity === 'Medium' || m.requiresManualReview);
+
+  let verificationStatus = 'Verified';
+  if (hasHardMismatch) {
+    verificationStatus = 'Mismatch Detected';
+  } else if (isManualReview) {
+    verificationStatus = 'Manual Review Required';
+  }
+
   return {
-    hasMismatch: mismatches.length > 0,
+    hasMismatch: hasHardMismatch,
+    isManualReview,
+    verificationStatus,
     mismatchDetails: mismatches,
     qrVerification: qrVerificationResult,
-    preVerificationPassed: mismatches.length === 0,
+    preVerificationPassed: !hasHardMismatch && !isManualReview,
   };
 };
 

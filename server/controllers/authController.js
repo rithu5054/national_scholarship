@@ -2,8 +2,10 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const StudentProfile = require('../models/StudentProfile');
+const Document = require('../models/Document');
 const { JWT_SECRET } = require('../middleware/auth');
 const { logAudit } = require('../services/auditService');
+const { detectMismatches } = require('../services/documentProcessor');
 
 const register = async (req, res) => {
   try {
@@ -168,6 +170,48 @@ const updateProfile = async (req, res) => {
       { $set: profileData },
       { new: true, upsert: true }
     );
+
+    // Invalidate/re-verify affected certificates if profile details changed
+    if (profile.certificates && profile.certificates.length > 0) {
+      const updatedUser = await User.findById(userId);
+      const comparisonData = {
+        studentName: updatedUser?.name || req.user.name,
+        annualFamilyIncome: profile.annualFamilyIncome,
+        percentageOrCGPA: profile.percentageOrCGPA,
+        course: profile.course,
+        institution: profile.institution,
+        category: profile.category,
+      };
+
+      let certsModified = false;
+      for (const cert of profile.certificates) {
+        if (cert.extractedData) {
+          const reval = await detectMismatches(comparisonData, cert.extractedData, cert.documentType);
+          cert.validationResults = reval;
+          cert.verificationStatus = reval.verificationStatus;
+          certsModified = true;
+
+          // Sync to Document record if linked
+          if (cert.documentId) {
+            await Document.findByIdAndUpdate(cert.documentId, {
+              validationResults: reval,
+              currentStatus: reval.verificationStatus === 'Verified' ? 'Pre-Verification Passed' : reval.verificationStatus,
+            });
+          }
+        }
+      }
+
+      if (certsModified) {
+        await profile.save();
+      }
+    }
+
+    await logAudit({
+      actorId: userId,
+      actorRole: 'student',
+      action: 'PROFILE_UPDATED',
+      reason: 'Student updated academic and financial profile details.',
+    });
 
     res.json({
       success: true,

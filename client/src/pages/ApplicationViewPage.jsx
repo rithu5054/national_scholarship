@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   FileText,
   Upload,
@@ -125,13 +125,29 @@ const ApplicationViewPage = () => {
     }
   };
 
+  const handleRevalidate = async (docId) => {
+    try {
+      setStatusMessage({ type: '', text: '' });
+      const res = await api.post(`/documents/${docId}/revalidate`);
+      if (res.data.success) {
+        setStatusMessage({
+          type: res.data.document.currentStatus === 'Mismatch Detected' ? 'warning' : 'success',
+          text: `Verification completed: ${res.data.document.currentStatus}`,
+        });
+        await fetchApplicationData();
+      }
+    } catch (err) {
+      setStatusMessage({ type: 'error', text: err.response?.data?.message || 'Re-validation failed.' });
+    }
+  };
+
   if (loading) return <div className="p-12 text-center text-slate-500">Loading application records...</div>;
   if (!application) return <div className="p-12 text-center text-slate-500">Application not found.</div>;
 
   const isEditable = ['draft', 'correction_required'].includes(application.status);
   const requiredDocs = application.scholarshipId?.requiredDocuments || [];
 
-  // Per-doc submission readiness (for the checklist card)
+  // Per-doc submission readiness
   const docReadiness = requiredDocs.map((reqDoc) => {
     const uploaded = documents.find((d) => d.documentType === reqDoc.documentType);
     if (!uploaded) return { docType: reqDoc.documentType, state: 'missing' };
@@ -140,6 +156,67 @@ const ApplicationViewPage = () => {
     return { docType: reqDoc.documentType, state: 'ok' };
   });
   const allDocsReady = docReadiness.every((d) => d.state === 'ok');
+
+  // Detailed blocked alerts for clear feedback
+  const blockedAlerts = requiredDocs
+    .map((reqDoc) => {
+      const uploaded = documents.find((d) => d.documentType === reqDoc.documentType);
+      if (!uploaded) {
+        return {
+          type: 'missing',
+          documentType: reqDoc.documentType,
+          title: `Required Certificate Missing: ${reqDoc.documentType}`,
+          description: `This scholarship requires an authentic ${reqDoc.documentType}. Please upload it before submitting.`,
+          status: 'Not Uploaded',
+          actionType: 'upload',
+        };
+      }
+
+      if (uploaded.currentStatus === 'Mismatch Detected') {
+        const isIncome = reqDoc.documentType.includes('Income');
+        const isMark = reqDoc.documentType.includes('Mark');
+        const hasTypeConflict = uploaded.validationResults?.mismatchDetails?.some((m) => m.field === 'Document Type Conflict');
+
+        return {
+          type: 'mismatch',
+          docId: uploaded._id,
+          documentType: reqDoc.documentType,
+          title: hasTypeConflict
+            ? `Incorrect Certificate Type Uploaded for ${reqDoc.documentType}`
+            : `Your ${reqDoc.documentType} does not match your profile details.`,
+          profileLabel: isIncome ? 'Profile annual income' : isMark ? 'Profile academic score' : 'Profile value',
+          profileValue: isIncome
+            ? `₹${Number(application.applicationData?.annualFamilyIncome || 0).toLocaleString('en-IN')}`
+            : isMark
+            ? `${application.applicationData?.percentageOrCGPA || 0}%`
+            : application.applicationData?.studentName,
+          certLabel: isIncome ? 'Income shown on certificate' : isMark ? 'Score shown on certificate' : 'Certificate value',
+          certValue: isIncome
+            ? uploaded.extractedData?.incomeAmount ? `₹${Number(uploaded.extractedData.incomeAmount).toLocaleString('en-IN')}` : 'Not Detected'
+            : isMark
+            ? uploaded.extractedData?.marks ? `${uploaded.extractedData.marks}%` : 'Not Detected'
+            : uploaded.extractedData?.studentName || 'Not Detected',
+          status: 'Mismatch Detected',
+          mismatches: uploaded.validationResults?.mismatchDetails || [],
+          actionType: 'resolve',
+        };
+      }
+
+      if (uploaded.currentStatus === 'Manual Review Required') {
+        return {
+          type: 'manual',
+          docId: uploaded._id,
+          documentType: reqDoc.documentType,
+          title: `OCR Unable to Read Required Details for ${reqDoc.documentType}`,
+          description: `The automated pre-verification system could not reliably read key required fields from this upload. An officer review will be required, or you can re-upload a clearer scan.`,
+          status: 'Manual Review Required',
+          actionType: 'reupload',
+        };
+      }
+
+      return null;
+    })
+    .filter(Boolean);
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -270,6 +347,87 @@ const ApplicationViewPage = () => {
           ))}
         </div>
       </div>
+
+      {/* CLEAR SUBMISSION BLOCKED ALERTS */}
+      {isEditable && blockedAlerts.length > 0 && (
+        <div className="bg-red-50/90 border-2 border-red-300 rounded-2xl p-6 space-y-4 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-red-100 rounded-xl text-red-600">
+              <AlertTriangle className="w-6 h-6" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-red-950">Application Submission Blocked</h2>
+              <p className="text-xs text-red-800">
+                You cannot submit this application until all required certificate checks pass. Review the issues below:
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3 pt-2">
+            {blockedAlerts.map((alert, bIdx) => (
+              <div key={bIdx} className="bg-white rounded-xl p-4 border border-red-200 text-xs space-y-2.5">
+                <div className="flex items-start justify-between gap-3">
+                  <h3 className="font-bold text-red-950 text-sm">{alert.title}</h3>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800 border border-red-200 shrink-0">
+                    {alert.status}
+                  </span>
+                </div>
+
+                {alert.description && <p className="text-slate-600 leading-relaxed">{alert.description}</p>}
+
+                {alert.type === 'mismatch' && (
+                  <div className="grid sm:grid-cols-2 gap-2 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+                    <div>
+                      <span className="text-slate-400">{alert.profileLabel}:</span>
+                      <p className="font-bold text-slate-900">{alert.profileValue}</p>
+                    </div>
+                    <div>
+                      <span className="text-slate-400">{alert.certLabel}:</span>
+                      <p className="font-bold text-red-700">{alert.certValue}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Link
+                      to="/student/profile"
+                      className="px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 font-semibold rounded-lg text-xs transition"
+                    >
+                      Correct Profile Details
+                    </Link>
+
+                    <label className="cursor-pointer px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold rounded-lg text-xs transition flex items-center gap-1">
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Re-upload {alert.documentType}</span>
+                      <input
+                        type="file"
+                        accept=".pdf,.png,.jpg,.jpeg"
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files?.[0]) {
+                            handleFileUpload(alert.documentType, e.target.files[0]);
+                          }
+                        }}
+                      />
+                    </label>
+
+                    {alert.docId && (
+                      <button
+                        onClick={() => handleRevalidate(alert.docId)}
+                        className="px-3 py-1.5 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 font-semibold rounded-lg text-xs transition flex items-center gap-1"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" /> Verify Again
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Student Application Form Data (with guided correction capability) */}
       <div className="bg-white rounded-2xl border border-slate-200 p-6">

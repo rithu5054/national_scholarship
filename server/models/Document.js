@@ -5,12 +5,21 @@ const documentSchema = new mongoose.Schema(
     applicationId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Application',
-      required: true,
+      required: false,
+      default: null,
     },
     studentId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
+    },
+    isProfileDocument: {
+      type: Boolean,
+      default: false,
+    },
+    version: {
+      type: Number,
+      default: 1,
     },
     documentType: {
       type: String,

@@ -62,6 +62,44 @@ const studentProfileSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    certificates: [
+      {
+        documentType: {
+          type: String,
+          required: true,
+        },
+        documentId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'Document',
+        },
+        storedFileName: String,
+        originalFileName: String,
+        mimeType: String,
+        fileSize: Number,
+        fileHash: String,
+        uploadDate: {
+          type: Date,
+          default: Date.now,
+        },
+        version: {
+          type: Number,
+          default: 1,
+        },
+        extractedData: mongoose.Schema.Types.Mixed,
+        validationResults: mongoose.Schema.Types.Mixed,
+        verificationStatus: {
+          type: String,
+          enum: [
+            'Not Uploaded',
+            'Pending Verification',
+            'Verified',
+            'Mismatch Detected',
+            'Manual Review Required',
+          ],
+          default: 'Pending Verification',
+        },
+      },
+    ],
   },
   { timestamps: true }
 );
