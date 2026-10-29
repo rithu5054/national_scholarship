@@ -418,7 +418,7 @@ const ApplicationViewPage = () => {
                     <div className="flex items-center justify-between text-xs text-slate-500">
                       <span>Original File: <span className="font-medium text-slate-700">{uploaded.originalFileName}</span></span>
                       <a
-                        href={`/api/documents/${uploaded._id}/file`}
+                        href={`/api/documents/${uploaded._id}/file?token=${localStorage.getItem('scholartrack_token') || ''}`}
                         target="_blank"
                         rel="noreferrer"
                         className="text-blue-600 hover:underline flex items-center gap-1 font-semibold"

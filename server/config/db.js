@@ -4,17 +4,24 @@ const { MongoMemoryServer } = require('mongodb-memory-server');
 let mongod = null;
 
 const connectDB = async () => {
+  const isCustomUri = Boolean(process.env.MONGODB_URI);
   const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/scholartrack';
 
   try {
-    // Attempt connecting to configured URI (Atlas or local MongoDB) with a short timeout
+    // If a cloud URI (Atlas) is configured, give it sufficient timeout (10s) for TLS handshake.
+    // If defaulting to local 127.0.0.1, fail quickly (2s) to initiate in-memory fallback.
     await mongoose.connect(uri, {
-      serverSelectionTimeoutMS: 2000,
+      serverSelectionTimeoutMS: isCustomUri ? 10000 : 2000,
     });
-    console.log(`[MongoDB] Connected successfully to ${uri}`);
+    console.log(`[MongoDB] Connected successfully to ${uri.startsWith('mongodb+srv://') ? 'MongoDB Atlas' : uri}`);
   } catch (err) {
-    console.warn(`[MongoDB] Could not connect to external/local MongoDB: ${err.message}`);
-    console.log('[MongoDB] Starting embedded in-memory MongoDB server for development...');
+    if (isCustomUri) {
+      console.warn(`[MongoDB] Could not connect to configured MONGODB_URI: ${err.message}`);
+    } else {
+      console.warn(`[MongoDB] Could not connect to local MongoDB: ${err.message}`);
+    }
+
+    console.log('[MongoDB] Starting embedded in-memory MongoDB server fallback...');
     
     try {
       mongod = await MongoMemoryServer.create();

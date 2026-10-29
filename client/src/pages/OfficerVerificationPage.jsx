@@ -269,7 +269,7 @@ const OfficerVerificationPage = () => {
 
                   <div className="flex items-center gap-2">
                     <a
-                      href={`/api/documents/${doc._id}/file`}
+                      href={`/api/documents/${doc._id}/file?token=${localStorage.getItem('scholartrack_token') || ''}`}
                       target="_blank"
                       rel="noreferrer"
                       className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-semibold rounded-lg flex items-center gap-1"
